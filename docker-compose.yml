@@ -9,7 +9,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-gym_saas_dev}
       APP_USER_PASSWORD: ${APP_USER_PASSWORD:-app_user_dev_password}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "${POSTGRES_PORT:-5439}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/initdb:/docker-entrypoint-initdb.d:ro
