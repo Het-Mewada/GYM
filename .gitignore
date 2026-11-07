@@ -1,0 +1,15 @@
+node_modules/
+.pnpm-store/
+dist/
+.turbo/
+.next/
+out/
+build/
+*.tsbuildinfo
+*.log
+.env
+.env.local
+.env.*.local
+coverage/
+.playwright/
+test-results/

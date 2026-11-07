@@ -1,0 +1,36 @@
+# Architectural Decision Records (ADRs)
+
+## ADR-001: Modular Monolith on Fastify v5
+- **Context**: Need a backend API with high throughput, minimal overhead, strong schema validation, and rapid startup in a monorepo.
+- **Decision**: Select Fastify v5 over NestJS. Fastify provides a lightweight plugin system, native JSON Schema / Zod serialization, and low memory overhead without requiring complex dependency injection decorators.
+- **Consequences**: Standardized plugin-based module architecture with fast local test execution.
+
+## ADR-002: Drizzle ORM for Direct SQL and RLS Integration
+- **Context**: The database relies on PostgreSQL transaction session variables (`SET LOCAL` / `set_config()`) to enforce Row Level Security per query.
+- **Decision**: Adopt Drizzle ORM over Prisma. Drizzle compiles directly to standard SQL, provides typed query construction without an intermediate binary engine, and allows seamless control over PostgreSQL transaction handles.
+- **Consequences**: Zero ORM runtime overhead and clean transaction scoping for `set_config('app.gym_id', ...)`.
+
+## ADR-003: PostgreSQL-Backed pg-boss Queue over Redis/BullMQ
+- **Context**: Background reminders, expiry notifications, and unfreeze checks need asynchronous queuing.
+- **Decision**: Use `pg-boss` backed by the existing PostgreSQL database for R1.
+- **Consequences**: Avoids provisioning, monitoring, and paying for a separate Redis cluster. Redis will only be introduced if job volume exceeds PostgreSQL transactional throughput limits (>5,000 jobs/sec).
+
+## ADR-004: Multi-Tenancy via Shared Schema, Composite Keys and RLS
+- **Context**: Gyms must be strictly isolated. Application-only `WHERE gym_id = ?` checks are prone to developer omissions.
+- **Decision**: Enforce isolation at the database layer with PostgreSQL `FORCE ROW LEVEL SECURITY` on all tenant tables, paired with composite foreign keys `(gym_id, parent_id)`.
+- **Consequences**: A tenant can never query or manipulate another tenant's rows, even in the event of an application logic bug.
+
+## ADR-005: Append-Only Financial Ledger and Minor-Unit Currency
+- **Context**: Payment amounts and historical receipts require 100% auditability and tax compliance.
+- **Decision**: Financial rows in `payment_transactions` are immutable (enforced via database role `REVOKE` and a PostgreSQL trigger). All monetary values are represented as `BIGINT` minor units (`amount_cents`). Corrections and refunds are recorded as new signed entries.
+- **Consequences**: Eliminates floating-point inaccuracies and guarantees an immutable financial audit trail.
+
+## ADR-006: Dual-Token Authentication with Rotating Refresh Cookies
+- **Context**: Need stateless, secure authentication for gym staff across desktop and tablet interfaces.
+- **Decision**: Issue 15-minute access JWTs in memory/headers and 7-day rotating refresh tokens stored in `httpOnly`, `Secure`, `SameSite=Lax` cookies. On each refresh, user gym membership status is re-verified, and old refresh tokens are invalidated with reuse detection.
+- **Consequences**: Prevents token replay attacks and guarantees instant deactivation of revoked staff.
+
+## ADR-007: Unified Single-Origin Reverse Proxy Deployment Topology
+- **Context**: Cross-origin cookies between distinct subdomains (`api.gym.com` and `app.gym.com`) face strict third-party cookie restrictions and CORS preflight latency.
+- **Decision**: Route traffic through a unified reverse proxy (Caddy / Next.js rewrites) on a single origin, dispatching `/api/*` to Fastify and all other routes to Next.js.
+- **Consequences**: Enables first-party cookies with zero CORS overhead and simplified SSL management.
