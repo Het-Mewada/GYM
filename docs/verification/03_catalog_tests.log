@@ -1,0 +1,12 @@
+ relname | relrowsecurity | relforcerowsecurity 
+---------+----------------+---------------------
+(0 rows)
+
+ relname 
+---------
+(0 rows)
+
+ conname | conrelid | confrelid 
+---------+----------+-----------
+(0 rows)
+

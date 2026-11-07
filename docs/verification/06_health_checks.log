@@ -1,0 +1,17 @@
+--- API Container Health (http://localhost:4000/health) ---
+{
+    "status":  "ok",
+    "service":  "gym-api",
+    "database":  {
+                     "status":  "healthy",
+                     "role":  "app_user"
+                 },
+    "timestamp":  "2026-11-07T10:42:31.520Z"
+}
+
+--- Web Container Health (http://localhost:3000/api/health) ---
+{
+    "status":  "ok",
+    "service":  "gym-web",
+    "timestamp":  "2026-11-07T10:42:34.583Z"
+}

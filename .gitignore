@@ -7,6 +7,7 @@ out/
 build/
 *.tsbuildinfo
 *.log
+!docs/verification/*.log
 .env
 .env.local
 .env.*.local

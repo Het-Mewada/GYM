@@ -1,0 +1,15 @@
+======================================================================
+PART 1: CONTROL RUN (Trigger Disabled: Simulating Unlocked Race Condition)
+======================================================================
+- Control-Thread-1: SUCCESS (Refunded 3000)
+- Control-Thread-2: SUCCESS (Refunded 3000)
+Result of Control Run: Total Refunded = 6000 cents against 5000 cents parent.
+CONFIRMED: Without lock, race condition occurs (over-refund of 6000 cents succeeded).
+
+======================================================================
+PART 2: GUARDED RUN (Two-Key Advisory Lock Active: trg_payment_refund_limit)
+======================================================================
+- Guarded-Thread-1: FAILED: Cumulative refund amount (6000) exceeds original payment (5000).
+- Guarded-Thread-2: SUCCESS (Refunded 3000)
+Result of Guarded Run: Total Refunded = 3000 cents against 5000 cents parent.
+SUCCESS: Two-key advisory lock serialized the transactions. Exactly one succeeded, second was rejected with over-refund error!

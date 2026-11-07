@@ -34,3 +34,12 @@
 - **Context**: Cross-origin cookies between distinct subdomains (`api.gym.com` and `app.gym.com`) face strict third-party cookie restrictions and CORS preflight latency.
 - **Decision**: Route traffic through a unified reverse proxy (Caddy / Next.js rewrites) on a single origin, dispatching `/api/*` to Fastify and all other routes to Next.js.
 - **Consequences**: Enables first-party cookies with zero CORS overhead and simplified SSL management.
+
+## ADR-008: SQL Migrations as Source of Truth & Database Connection Assertions
+- **Context**: ORM-driven schema generation often misses subtle engine-level security mechanisms such as Row Level Security (RLS), advisory locks, custom partial unique indexes, and grant revocations. Additionally, if the API accidentally connects using a superuser account, RLS is completely bypassed.
+- **Decision**: Raw SQL migrations are the absolute source of truth for the database schema. Drizzle ORM introspection is used solely for generating TypeScript interfaces verified against the active schema in CI. Furthermore, the API connection pool executes an immutable startup assertion:
+  ```sql
+  SELECT rolname, rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user;
+  ```
+  If `rolsuper = true` or `rolbypassrls = true`, the application process terminates immediately with a critical security violation.
+- **Consequences**: Guarantees that the application always executes strictly within the non-privileged `app_user` sandbox and that no code deployment can silently bypass RLS.

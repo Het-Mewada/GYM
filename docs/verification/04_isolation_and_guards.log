@@ -1,0 +1,127 @@
+TRUNCATE TABLE
+     rolname      | rolsuper | rolbypassrls | rolcanlogin 
+------------------+----------+--------------+-------------
+ app_user         | f        | f            | t
+ definer_admin    | f        | t            | f
+ retention_worker | f        | f            | t
+(3 rows)
+
+           proname            |     owner     | is_security_definer |            proconfig            
+------------------------------+---------------+---------------------+---------------------------------
+ auth_complete_password_reset | definer_admin | t                   | {"search_path=public, pg_temp"}
+ auth_lookup_user_by_phone    | definer_admin | t                   | {"search_path=public, pg_temp"}
+ auth_register_user           | definer_admin | t                   | {"search_path=public, pg_temp"}
+ claim_staff_invitation       | definer_admin | t                   | {"search_path=public, pg_temp"}
+ generate_next_member_number  | definer_admin | t                   | {"search_path=public, pg_temp"}
+ generate_next_receipt_number | definer_admin | t                   | {"search_path=public, pg_temp"}
+ provision_gym                | definer_admin | t                   | {"search_path=public, pg_temp"}
+ update_tenant_settings       | definer_admin | t                   | {"search_path=public, pg_temp"}
+ void_attendance_record       | definer_admin | t                   | {"search_path=public, pg_temp"}
+(9 rows)
+
+              set_config              
+--------------------------------------
+ bcf69aae-b808-4bb5-bfba-7e0dde05e8ad
+(1 row)
+
+              set_config              
+--------------------------------------
+ bcf69aae-b808-4bb5-bfba-7e0dde05e8ad
+(1 row)
+
+ receipt_nov1_ist  
+-------------------
+ REC-202611-000001
+(1 row)
+
+SET
+              set_config              
+--------------------------------------
+ bcf69aae-b808-4bb5-bfba-7e0dde05e8ad
+(1 row)
+
+              set_config              
+--------------------------------------
+ 795c7e4a-21a7-4008-8ede-e0cad9c21c12
+(1 row)
+
+INSERT 0 1
+              set_config              
+--------------------------------------
+ 8bb46882-147f-4050-9aa3-a8b532889ae1
+(1 row)
+
+              set_config              
+--------------------------------------
+ 672a353b-95ad-4fc2-9827-27c443a72cbb
+(1 row)
+
+INSERT 0 1
+DO
+DO
+DO
+DO
+DO
+DO
+DO
+DO
+              set_config              
+--------------------------------------
+ bcf69aae-b808-4bb5-bfba-7e0dde05e8ad
+(1 row)
+
+              set_config              
+--------------------------------------
+ 795c7e4a-21a7-4008-8ede-e0cad9c21c12
+(1 row)
+
+INSERT 0 1
+INSERT 0 0
+ count_active_before_void 
+--------------------------
+                        1
+(1 row)
+
+ void_attendance_record 
+------------------------
+ 
+(1 row)
+
+INSERT 0 1
+ count_active_after_void 
+-------------------------
+                       1
+(1 row)
+
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+ net_revenue_november 
+----------------------
+                 3000
+(1 row)
+
+           subscription_id            | first_name | net_price | total_paid_and_opening | outstanding_due 
+--------------------------------------+------------+-----------+------------------------+-----------------
+ 11111111-c001-0001-0001-000000000001 | Amit       |      5000 |                   5000 |               0
+ 11111111-c002-0002-0002-000000000002 | Vikram     |      5000 |                   3000 |            2000
+(2 rows)
+
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+DO
+INSERT 0 3
+INSERT 0 3
+INSERT 0 1
+INSERT 0 1
+ member_number |   first_name   |  end_date  | days_remaining 
+---------------+----------------+------------+----------------
+ MEM-W01       | WorklistActive | 2026-11-10 |              3
+(1 row)
+
+RESET
