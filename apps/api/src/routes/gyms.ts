@@ -165,12 +165,16 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
 
       return reply.status(201).send({ member: created });
     } catch (err: unknown) {
-      const dbErr = err as { code?: string; constraint?: string; message?: string };
+      const dbErr = (err && typeof err === 'object' && 'cause' in err && err.cause ? err.cause : err) as {
+        code?: string;
+        constraint?: string;
+        message?: string;
+      };
       if (dbErr.code === '23505') {
         if (dbErr.constraint?.includes('phone')) {
           return reply.status(409).send({ error: 'A member with this phone number already exists in this gym' });
         }
-        return reply.status(409).send({ error: 'Member already exists with these details' });
+        return reply.status(409).send({ error: 'A member with this sequence number or details already exists' });
       }
       return reply.status(400).send({ error: dbErr.message || 'Failed to create member' });
     }

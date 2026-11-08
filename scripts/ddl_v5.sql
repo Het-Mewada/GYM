@@ -1183,15 +1183,27 @@ SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_next_num BIGINT;
+  v_max_existing BIGINT;
 BEGIN
   IF p_gym_id <> NULLIF(current_setting('app.gym_id', true), '')::uuid THEN
     RAISE EXCEPTION 'Access denied: p_gym_id does not match active session tenant.';
   END IF;
 
+  SELECT COALESCE(MAX(SUBSTRING(member_number FROM 5)::BIGINT), 0)
+  INTO v_max_existing
+  FROM members
+  WHERE gym_id = p_gym_id AND member_number ~ '^MEM-[0-9]+$';
+
   UPDATE member_sequences
-  SET last_member_number = last_member_number + 1
+  SET last_member_number = GREATEST(last_member_number, v_max_existing) + 1
   WHERE gym_id = p_gym_id
   RETURNING last_member_number INTO v_next_num;
+
+  IF v_next_num IS NULL THEN
+    v_next_num := v_max_existing + 1;
+    INSERT INTO member_sequences (gym_id, last_member_number)
+    VALUES (p_gym_id, v_next_num);
+  END IF;
 
   RETURN 'MEM-' || lpad(v_next_num::TEXT, 5, '0');
 END;
