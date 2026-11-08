@@ -11,7 +11,8 @@ describe('Concurrency & Race Condition Verification Suite', () => {
     const projectRoot = path.resolve(__dirname, '../../../');
     const output = execSync('node scripts/test_refund_concurrency_v5.mjs', {
       cwd: projectRoot,
-      encoding: 'utf-8'
+      encoding: 'utf-8',
+      env: process.env
     });
 
     expect(output).toContain('CONFIRMED: Without pg_advisory_xact_lock, race condition occurs');
@@ -24,7 +25,8 @@ describe('Concurrency & Race Condition Verification Suite', () => {
     const projectRoot = path.resolve(__dirname, '../../../');
     const output = execSync('node scripts/test_overlap_concurrency.mjs', {
       cwd: projectRoot,
-      encoding: 'utf-8'
+      encoding: 'utf-8',
+      env: process.env
     });
 
     expect(output).toContain('CONFIRMED: Without pg_advisory_xact_lock, race condition occurs');
