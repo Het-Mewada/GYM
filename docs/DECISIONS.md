@@ -43,3 +43,9 @@
   ```
   If `rolsuper = true` or `rolbypassrls = true`, the application process terminates immediately with a critical security violation.
 - **Consequences**: Guarantees that the application always executes strictly within the non-privileged `app_user` sandbox and that no code deployment can silently bypass RLS.
+
+## ADR-009: Database-Enforced Role Authorization for Privileged Procedures
+- **Context**: Relying exclusively on API route handlers or middleware for role-based authorization (e.g., verifying whether an authenticated user is an 'owner', 'manager', or 'staff' before performing sensitive mutations like voiding attendance, modifying tenant settings, or claiming invites) creates severe risk: if route middleware is omitted, routing reconfigured, or an API defect occurs, unauthorized mutations could execute.
+- **Decision**: Privileged operations executed via `SECURITY DEFINER` database procedures enforce role authorization inside the database function itself. Functions like `void_attendance_record` query `user_gym_memberships` for `(gym_id, NULLIF(current_setting('app.user_id', true), '')::uuid)` and explicitly require `role IN ('owner', 'manager')`, raising an exception if unauthorized (`staff` or unlinked callers).
+- **Consequences**: Provides single-source-of-truth authorization directly at the data boundary. The database role `app_user` cannot perform administrative mutations even if the calling application layer fails to check permissions.
+

@@ -163,12 +163,13 @@ CREATE TABLE subscriptions (
   end_date DATE NOT NULL,
   total_price_cents BIGINT NOT NULL CHECK (total_price_cents >= 0),
   discount_cents BIGINT NOT NULL DEFAULT 0 CHECK (discount_cents >= 0),
+  price_adjustment_cents BIGINT NOT NULL DEFAULT 0 CHECK (price_adjustment_cents >= 0),
   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT uq_subscriptions_gym_id UNIQUE (gym_id, id),
   CONSTRAINT fk_sub_gym_member FOREIGN KEY (gym_id, member_id) REFERENCES members(gym_id, id) ON DELETE RESTRICT,
   CONSTRAINT fk_sub_gym_plan FOREIGN KEY (gym_id, plan_id) REFERENCES membership_plans(gym_id, id) ON DELETE RESTRICT,
   CONSTRAINT check_sub_dates CHECK (end_date >= start_date),
-  CONSTRAINT check_sub_discount CHECK (discount_cents <= total_price_cents)
+  CONSTRAINT check_sub_discount CHECK ((discount_cents + price_adjustment_cents) <= total_price_cents)
 );
 CREATE INDEX idx_subscriptions_gym_member ON subscriptions(gym_id, member_id);
 CREATE INDEX idx_subscriptions_gym_end_date ON subscriptions(gym_id, end_date);
@@ -330,6 +331,11 @@ DECLARE
   v_lock_key1 INT;
   v_lock_key2 INT;
 BEGIN
+  -- Bypass check if currently executing an atomic subscription shift from freeze
+  IF current_setting('app.in_freeze_shift', true) = 'true' THEN
+    RETURN NEW;
+  END IF;
+
   IF NEW.status IN ('active', 'queued') THEN
     -- Two-key advisory transaction lock per member to serialize concurrent subscription creations
     v_lock_key1 := hashtext('sub_overlap_' || NEW.gym_id::text);
@@ -404,6 +410,85 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER trg_payment_refund_limit
 BEFORE INSERT ON payment_transactions
 FOR EACH ROW EXECUTE FUNCTION validate_refund_limit();
+
+-- Guard: Refund on Active Subscription Requires Cancellation or Price Adjustment (Goodwill)
+CREATE OR REPLACE FUNCTION validate_subscription_refund_semantics()
+RETURNS TRIGGER AS $$
+DECLARE
+  v_sub_status VARCHAR(20);
+  v_sub_net_price BIGINT;
+  v_sub_paid BIGINT;
+BEGIN
+  IF NEW.type IN ('refund', 'reversal') AND NEW.subscription_id IS NOT NULL THEN
+    SELECT status, (total_price_cents - discount_cents - price_adjustment_cents)
+    INTO v_sub_status, v_sub_net_price
+    FROM subscriptions
+    WHERE gym_id = NEW.gym_id AND id = NEW.subscription_id;
+
+    IF v_sub_status = 'active' THEN
+      SELECT COALESCE(SUM(amount_cents), 0) INTO v_sub_paid
+      FROM payment_transactions
+      WHERE gym_id = NEW.gym_id AND subscription_id = NEW.subscription_id;
+
+      -- If after this refund, total paid would drop below net price without price adjustment:
+      IF (v_sub_paid + NEW.amount_cents) < v_sub_net_price THEN
+        RAISE EXCEPTION 'Invalid refund semantics: refund on active subscription requires either cancelling the subscription or recording a price adjustment (goodwill credit) so dues do not reappear.';
+      END IF;
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_payment_refund_semantics
+BEFORE INSERT ON payment_transactions
+FOR EACH ROW EXECUTE FUNCTION validate_subscription_refund_semantics();
+
+-- Shift Rule: Freeze on Active Subscription Extends It and Shifts All Queued Renewals
+CREATE OR REPLACE FUNCTION apply_subscription_freeze_shift()
+RETURNS TRIGGER AS $$
+DECLARE
+  v_sub_status VARCHAR(20);
+  v_member_id UUID;
+  v_start_date DATE;
+BEGIN
+  IF TG_OP = 'INSERT' AND NEW.is_active = true THEN
+    SELECT status, member_id, start_date
+    INTO v_sub_status, v_member_id, v_start_date
+    FROM subscriptions
+    WHERE gym_id = NEW.gym_id AND id = NEW.subscription_id;
+
+    IF v_sub_status <> 'active' THEN
+      RAISE EXCEPTION 'Cannot freeze subscription with status %. Only active subscriptions may be frozen.', v_sub_status;
+    END IF;
+
+    -- Set session flag to bypass overlap trigger during atomic shift
+    PERFORM set_config('app.in_freeze_shift', 'true', true);
+
+    -- 1. Shift all subsequent queued subscriptions forward by days_frozen
+    UPDATE subscriptions
+    SET start_date = start_date + NEW.days_frozen,
+        end_date = end_date + NEW.days_frozen
+    WHERE gym_id = NEW.gym_id
+      AND member_id = v_member_id
+      AND status = 'queued'
+      AND start_date > v_start_date;
+
+    -- 2. Extend active subscription end_date by days_frozen
+    UPDATE subscriptions
+    SET end_date = end_date + NEW.days_frozen
+    WHERE gym_id = NEW.gym_id AND id = NEW.subscription_id;
+
+    -- Reset session flag
+    PERFORM set_config('app.in_freeze_shift', 'false', true);
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_subscription_freeze_shift
+AFTER INSERT ON subscription_freezes
+FOR EACH ROW EXECUTE FUNCTION apply_subscription_freeze_shift();
 
 -- ============================================================================
 -- 5. ROW LEVEL SECURITY (RLS) POLICIES
@@ -617,7 +702,13 @@ SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_gym_id UUID;
+  v_session_user_id UUID;
 BEGIN
+  v_session_user_id := NULLIF(current_setting('app.user_id', true), '')::uuid;
+  IF v_session_user_id IS NULL OR p_owner_id <> v_session_user_id THEN
+    RAISE EXCEPTION 'Access denied: p_owner_id does not match active session user.';
+  END IF;
+
   IF NOT EXISTS (SELECT 1 FROM pg_timezone_names WHERE name = p_timezone) THEN
     RAISE EXCEPTION 'Invalid IANA timezone: %', p_timezone;
   END IF;
@@ -670,6 +761,36 @@ END;
 $$;
 ALTER FUNCTION update_tenant_settings OWNER TO definer_admin;
 
+-- Function 4b: Get Tenant Settings (Safe Definer Lookup for Active Gym)
+CREATE OR REPLACE FUNCTION get_tenant_settings(p_gym_id UUID)
+RETURNS TABLE (
+  out_id UUID,
+  out_name VARCHAR(100),
+  out_slug VARCHAR(50),
+  out_country VARCHAR(2),
+  out_timezone VARCHAR(50),
+  out_currency VARCHAR(3),
+  out_tax_rate_basis_points BIGINT,
+  out_tax_is_inclusive BOOLEAN,
+  out_status VARCHAR(20)
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  IF p_gym_id <> NULLIF(current_setting('app.gym_id', true), '')::uuid THEN
+    RAISE EXCEPTION 'Access denied: p_gym_id does not match active session tenant.';
+  END IF;
+
+  RETURN QUERY
+  SELECT t.id, t.name, t.slug, t.default_country, t.timezone, t.currency, t.tax_rate_basis_points, t.tax_is_inclusive, t.status
+  FROM tenants t
+  WHERE t.id = p_gym_id;
+END;
+$$;
+ALTER FUNCTION get_tenant_settings OWNER TO definer_admin;
+
 -- Function 5: Claim Staff Invitation (Guards against changing existing membership)
 CREATE OR REPLACE FUNCTION claim_staff_invitation(
   p_token_hash VARCHAR(64),
@@ -683,7 +804,13 @@ AS $$
 DECLARE
   v_invite RECORD;
   v_existing_membership UUID;
+  v_session_user_id UUID;
 BEGIN
+  v_session_user_id := NULLIF(current_setting('app.user_id', true), '')::uuid;
+  IF v_session_user_id IS NULL OR p_user_id <> v_session_user_id THEN
+    RAISE EXCEPTION 'Access denied: p_user_id does not match active session user.';
+  END IF;
+
   SELECT i.id, i.gym_id, i.role, i.expires_at, i.used_at
   INTO v_invite
   FROM staff_invitations i
@@ -721,10 +848,10 @@ END;
 $$;
 ALTER FUNCTION claim_staff_invitation OWNER TO definer_admin;
 
--- Function 6: Generate Receipt Number (Accepts timestamp; defaults to CURRENT_TIMESTAMP)
-CREATE OR REPLACE FUNCTION generate_next_receipt_number(
+-- Function 6a: Internal timestamped generator (only for definer_admin / maintenance / tests)
+CREATE OR REPLACE FUNCTION _generate_next_receipt_number_internal(
   p_gym_id UUID,
-  p_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+  p_at TIMESTAMPTZ
 )
 RETURNS VARCHAR(50)
 LANGUAGE plpgsql
@@ -756,7 +883,20 @@ BEGIN
   RETURN 'REC-' || v_ym || '-' || lpad(v_next_num::TEXT, 6, '0');
 END;
 $$;
-ALTER FUNCTION generate_next_receipt_number OWNER TO definer_admin;
+ALTER FUNCTION _generate_next_receipt_number_internal OWNER TO definer_admin;
+
+-- Function 6b: Public wrapper for app_user (no timestamp parameter!)
+CREATE OR REPLACE FUNCTION generate_next_receipt_number(p_gym_id UUID)
+RETURNS VARCHAR(50)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  RETURN _generate_next_receipt_number_internal(p_gym_id, CURRENT_TIMESTAMP);
+END;
+$$;
+ALTER FUNCTION generate_next_receipt_number(UUID) OWNER TO definer_admin;
 
 -- Function 7: Generate Monotonic Member Identifier
 CREATE OR REPLACE FUNCTION generate_next_member_number(p_gym_id UUID)
@@ -782,7 +922,7 @@ END;
 $$;
 ALTER FUNCTION generate_next_member_number OWNER TO definer_admin;
 
--- Function 8: Void Attendance Record (Definer function with audit trail)
+-- Function 8: Void Attendance Record (Definer function with role authorization, ADR-009)
 CREATE OR REPLACE FUNCTION void_attendance_record(
   p_gym_id UUID,
   p_attendance_id UUID,
@@ -795,12 +935,25 @@ SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_user_id UUID;
+  v_user_role VARCHAR(20);
 BEGIN
   IF p_gym_id <> NULLIF(current_setting('app.gym_id', true), '')::uuid THEN
     RAISE EXCEPTION 'Access denied: p_gym_id does not match active session tenant.';
   END IF;
 
   v_user_id := NULLIF(current_setting('app.user_id', true), '')::uuid;
+  IF v_user_id IS NULL THEN
+    RAISE EXCEPTION 'Active session user not set.';
+  END IF;
+
+  -- Role authorization check enforced in DB function (ADR-009)
+  SELECT role INTO v_user_role
+  FROM user_gym_memberships
+  WHERE gym_id = p_gym_id AND user_id = v_user_id AND is_active = true;
+
+  IF v_user_role IS NULL OR v_user_role NOT IN ('owner', 'manager') THEN
+    RAISE EXCEPTION 'Access denied: role % is not authorized to void attendance. Required: owner or manager.', COALESCE(v_user_role, 'none');
+  END IF;
 
   UPDATE attendance_logs
   SET is_voided = true,
@@ -837,13 +990,18 @@ REVOKE UPDATE, DELETE, TRUNCATE ON payment_transactions, attendance_logs, audit_
 -- Grants for retention_worker role
 GRANT SELECT, DELETE ON notification_logs, csv_import_jobs TO retention_worker;
 
+-- Revoke internal generator from PUBLIC and app_user (Gate item 6)
+REVOKE ALL ON FUNCTION _generate_next_receipt_number_internal(UUID, TIMESTAMPTZ) FROM PUBLIC, app_user;
+GRANT EXECUTE ON FUNCTION _generate_next_receipt_number_internal(UUID, TIMESTAMPTZ) TO definer_admin;
+
 -- Execute permissions on SECURITY DEFINER functions
 GRANT EXECUTE ON FUNCTION auth_register_user TO app_user;
 GRANT EXECUTE ON FUNCTION auth_lookup_user_by_phone TO app_user;
 GRANT EXECUTE ON FUNCTION auth_complete_password_reset TO app_user;
 GRANT EXECUTE ON FUNCTION provision_gym TO app_user;
 GRANT EXECUTE ON FUNCTION update_tenant_settings TO app_user;
+GRANT EXECUTE ON FUNCTION get_tenant_settings TO app_user;
 GRANT EXECUTE ON FUNCTION claim_staff_invitation TO app_user;
-GRANT EXECUTE ON FUNCTION generate_next_receipt_number TO app_user;
-GRANT EXECUTE ON FUNCTION generate_next_member_number TO app_user;
+GRANT EXECUTE ON FUNCTION generate_next_receipt_number(UUID) TO app_user;
+GRANT EXECUTE ON FUNCTION generate_next_member_number(UUID) TO app_user;
 GRANT EXECUTE ON FUNCTION void_attendance_record TO app_user;

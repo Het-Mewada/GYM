@@ -49,9 +49,12 @@ echo -e "\n>>> STEP 6: Executing Comprehensive Test Suite"
 cat scripts/test_v5_comprehensive.sql | docker exec -i gym-postgres psql -U postgres -d gym_saas_dev | tee docs/verification/04_isolation_and_guards.log
 
 echo -e "\n>>> STEP 7: Executing Refund Concurrency Test with Control Race Run"
-node scripts/test_refund_concurrency_v5.js | tee docs/verification/05_refund_concurrency_with_control.log
+node scripts/test_refund_concurrency_v5.mjs | tee docs/verification/05_refund_concurrency_with_control.log
 
-echo -e "\n>>> STEP 8: Testing Live Container Health Endpoints"
+echo -e "\n>>> STEP 8: Executing Overlap Concurrency Test with Control Race Run"
+node scripts/test_overlap_concurrency.mjs | tee docs/verification/06_overlap_concurrency_with_control.log
+
+echo -e "\n>>> STEP 9: Testing Live Container Health Endpoints"
 until curl -s http://localhost:4000/health > /dev/null; do
     echo "Waiting for API service..."
     sleep 2
@@ -60,7 +63,7 @@ until curl -s http://localhost:3000/api/health > /dev/null; do
     echo "Waiting for Web service..."
     sleep 2
 done
-curl -s http://localhost:4000/health | tee docs/verification/06_health_checks.log
-echo "" | tee -a docs/verification/06_health_checks.log
-curl -s http://localhost:3000/api/health | tee -a docs/verification/06_health_checks.log
+curl -s http://localhost:4000/health | tee docs/verification/07_health_checks.log
+echo "" | tee -a docs/verification/07_health_checks.log
+curl -s http://localhost:3000/api/health | tee -a docs/verification/07_health_checks.log
 echo -e "\n>>> ALL VERIFICATION STEPS COMPLETED SUCCESSFULLY!"

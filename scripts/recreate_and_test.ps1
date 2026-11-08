@@ -68,9 +68,12 @@ Write-Host "`n>>> STEP 6: Executing Comprehensive Test Suite (Isolation, Roles, 
 Get-Content scripts/test_v5_comprehensive.sql | docker exec -i gym-postgres psql -U postgres -d gym_saas_dev | Tee-Object -FilePath "docs/verification/04_isolation_and_guards.log"
 
 Write-Host "`n>>> STEP 7: Executing Refund Concurrency Test with Control Race Run"
-node scripts/test_refund_concurrency_v5.js | Tee-Object -FilePath "docs/verification/05_refund_concurrency_with_control.log"
+node scripts/test_refund_concurrency_v5.mjs | Tee-Object -FilePath "docs/verification/05_refund_concurrency_with_control.log"
 
-Write-Host "`n>>> STEP 8: Testing Live Container Health Endpoints (API + Web)"
+Write-Host "`n>>> STEP 8: Executing Overlap Concurrency Test with Control Race Run"
+node scripts/test_overlap_concurrency.mjs | Tee-Object -FilePath "docs/verification/06_overlap_concurrency_with_control.log"
+
+Write-Host "`n>>> STEP 9: Testing Live Container Health Endpoints (API + Web)"
 $apiHealth = $null
 $webHealth = $null
 
@@ -112,7 +115,7 @@ $($apiHealth | ConvertTo-Json -Depth 5)
 $($webHealth | ConvertTo-Json -Depth 5)
 "@
 
-$healthLog | Tee-Object -FilePath "docs/verification/06_health_checks.log"
+$healthLog | Tee-Object -FilePath "docs/verification/07_health_checks.log"
 
 # Normalize all log files to UTF-8 without BOM
 Get-ChildItem "docs/verification/*.log" | ForEach-Object {
