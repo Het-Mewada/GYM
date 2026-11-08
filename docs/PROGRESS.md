@@ -20,14 +20,36 @@
   - Re-run automation: Committed `scripts/recreate_and_test.ps1` and `scripts/recreate_and_test.sh` runnable from `docker compose down -v`.
   - Raw unedited logs captured and committed in `docs/verification/`.
 
+- [x] **Phase 2 Milestone 2: Drizzle ORM Schema & Parameterized Session Runner**
+  - Generated Drizzle schema mirroring DDL v5 (`packages/db/src/schema.ts`).
+  - Implemented parameterized `withTenantContext` runner enforcing RLS via `set_config('app.gym_id', ...)`.
+  - Added schema drift assertions and automated test coverage.
+- [x] **Milestone 2 Hardening (PR A - Merged)**
+  - Closed open registration; enforced invite-only / admin-provisioned pilot accounts.
+  - Implemented database-backed per-account login throttling (`account_login_attempts`) and timing attack defense via dummy Argon2id hash.
+  - Replaced legacy member reset with owner-only `/staff/:userId/reset-password`.
+  - Guarded concurrency tests with `try...finally` function restoration and serialized execution.
+- [x] **Phase 3 Slice 1: Members Directory End-to-End (PR B - Merged)**
+  - Built members list, create, search, and edit APIs with strict tenant isolation.
+  - Added single-name support and monotonic member numbering (`MEM-00001`).
+  - Enforced unique phone and email constraints per gym (`idx_members_gym_phone_unique`, `idx_members_gym_email_unique`).
+  - Delivered responsive members web interface with search/filtering and Playwright journey.
+- [x] **Phase 3 Slice 2: Membership Plans & Subscriptions Lifecycle (PR D - Ready for Review)**
+  - Built membership plans CRUD (`/api/gyms/:gymId/plans`) with manager/owner RBAC and duration/pricing controls.
+  - Built subscription issuance with inclusive calendar arithmetic ($endDate = startDate + duration - 1$).
+  - Overlap prevention via PostgreSQL advisory locks returning `409 Conflict`, with automatic sequential queuing.
+  - Dedicated Plans page (`/plans`) and Member Subscriptions management modal (`data-testid="subscriptions-modal"`).
+  - Multi-tenant tenant-switch authentication flow and full Playwright E2E journey.
+
 ## In Progress
-- [ ] **Phase 2 Milestone 2: Drizzle ORM Schema & Parameterized Session Runner**
-  - Generate Drizzle schema files mirroring DDL v5.
-  - Implement parameterized `set_config('app.gym_id', ...)` transaction runner in `@gym/api`.
+- [ ] **Phase 3 Slice 3: Payments & Invoicing (Ledger Integration)**
+  - Record payment transactions (`payment_transactions`) for subscriptions.
+  - Generate sequential tax receipts (`REC-YYYYMM-000001`).
+  - Track balances, partial payments, and overdue accounts.
 
 ## Blocked
 - None.
 
 ## Next Up
-- Auth module: Argon2id hashing, dual-token JWT issuance, rotating refresh tokens with reuse detection.
-- Tenant provisioning API (`POST /api/auth/register` and `POST /api/tenants`).
+- Phase 3 Slice 4: Attendance Tracking (Check-in / Check-out, QR scan, manual voiding).
+- Phase 3 Slice 5: CSV Member Importer with transactional batching.
