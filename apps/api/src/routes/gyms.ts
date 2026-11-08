@@ -1,6 +1,6 @@
 import type { FastifyPluginAsync } from 'fastify';
 import type pg from 'pg';
-import { withTenantContext, members, eq, and } from '@gym/db';
+import { withTenantContext, members, eq, and, or, ilike, isNull, desc, sql } from '@gym/db';
 import { authenticateUser, createRequireTenantMembership } from '../middleware/auth.js';
 import { generateRandomToken, hashToken } from '../auth/crypto.js';
 
@@ -43,57 +43,137 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
     }
   });
 
-  // 2. List members in gym
+  // 2. List members in gym (with search query, status filter, and pagination)
   fastify.get<{
     Params: { gymId: string };
+    Querystring: { q?: string; status?: string; limit?: string; offset?: string };
   }>('/:gymId/members', {
     preHandler: [authenticateUser, requireTenant]
   }, async (req, reply) => {
     const { gymId, userId } = req.tenantContext!;
+    const { q, status, limit: rawLimit, offset: rawOffset } = req.query;
 
-    const result = await withTenantContext(pool, { gymId, userId }, async (db) => {
-      return await db.select().from(members).where(eq(members.gymId, gymId));
+    const limit = Math.min(Math.max(parseInt(rawLimit || '50', 10) || 50, 1), 100);
+    const offset = Math.max(parseInt(rawOffset || '0', 10) || 0, 0);
+
+    const { membersList, total } = await withTenantContext(pool, { gymId, userId }, async (db) => {
+      const conditions = [eq(members.gymId, gymId), isNull(members.deletedAt)];
+
+      if (status && status !== 'all') {
+        conditions.push(eq(members.status, status));
+      }
+
+      if (q && q.trim()) {
+        const searchTerm = `%${q.trim()}%`;
+        conditions.push(
+          or(
+            ilike(members.firstName, searchTerm),
+            ilike(members.lastName, searchTerm),
+            ilike(members.phone, searchTerm),
+            ilike(members.memberNumber, searchTerm),
+            sql`(${members.firstName} || ' ' || COALESCE(${members.lastName}, '')) ILIKE ${searchTerm}`
+          )!
+        );
+      }
+
+      const rows = await db
+        .select()
+        .from(members)
+        .where(and(...conditions))
+        .orderBy(desc(members.createdAt))
+        .limit(limit)
+        .offset(offset);
+
+      const countRes = await db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(members)
+        .where(and(...conditions));
+
+      return {
+        membersList: rows,
+        total: Number(countRes[0]?.count || 0)
+      };
     });
 
-    return reply.send({ members: result });
+    return reply.send({
+      members: membersList,
+      total,
+      limit,
+      offset
+    });
   });
 
   // 3. Create member in gym
   fastify.post<{
     Params: { gymId: string };
-    Body: { firstName: string; lastName?: string; phone: string; email?: string; gym_id?: string; gymId?: string };
+    Body: {
+      firstName: string;
+      lastName?: string;
+      phone: string;
+      email?: string;
+      gender?: string;
+      dateOfBirth?: string;
+      emergencyContactName?: string;
+      emergencyContactPhone?: string;
+      gym_id?: string;
+      gymId?: string;
+    };
   }>('/:gymId/members', {
     preHandler: [authenticateUser, requireTenant]
   }, async (req, reply) => {
     const { gymId, userId } = req.tenantContext!;
-    const { firstName, lastName, phone, email } = req.body;
+    const {
+      firstName,
+      lastName,
+      phone,
+      email,
+      gender = 'unspecified',
+      dateOfBirth,
+      emergencyContactName,
+      emergencyContactPhone
+    } = req.body;
 
-    if (!firstName || !phone) {
+    if (!firstName || !firstName.trim() || !phone || !phone.trim()) {
       return reply.status(400).send({ error: 'firstName and phone are required' });
     }
 
-    const created = await withTenantContext(pool, { gymId, userId }, async (db, client) => {
-      // Generate monotonic member number
-      const seqRes = await client.query<{ generate_next_member_number: string }>(
-        'SELECT generate_next_member_number($1) as generate_next_member_number;',
-        [gymId]
-      );
-      const memberNumber = seqRes.rows[0].generate_next_member_number;
+    try {
+      const created = await withTenantContext(pool, { gymId, userId }, async (db, client) => {
+        // Generate monotonic member number
+        const seqRes = await client.query<{ generate_next_member_number: string }>(
+          'SELECT generate_next_member_number($1) as generate_next_member_number;',
+          [gymId]
+        );
+        const memberNumber = seqRes.rows[0].generate_next_member_number;
 
-      const rows = await db.insert(members).values({
-        gymId,
-        memberNumber,
-        firstName,
-        lastName: lastName || null,
-        phone,
-        email: email || null,
-        status: 'active'
-      }).returning();
+        const rows = await db.insert(members).values({
+          gymId,
+          memberNumber,
+          firstName: firstName.trim(),
+          lastName: lastName?.trim() ? lastName.trim() : null,
+          phone: phone.trim(),
+          email: email?.trim() ? email.trim() : null,
+          gender: gender || 'unspecified',
+          dateOfBirth: dateOfBirth || null,
+          emergencyContactName: emergencyContactName?.trim() ? emergencyContactName.trim() : null,
+          emergencyContactPhone: emergencyContactPhone?.trim() ? emergencyContactPhone.trim() : null,
+          status: 'active'
+        }).returning();
 
-      return rows[0];
-    });
+        return rows[0];
+      });
 
-    return reply.status(201).send({ member: created });
+      return reply.status(201).send({ member: created });
+    } catch (err: unknown) {
+      const dbErr = err as { code?: string; constraint?: string; message?: string };
+      if (dbErr.code === '23505') {
+        if (dbErr.constraint?.includes('phone')) {
+          return reply.status(409).send({ error: 'A member with this phone number already exists in this gym' });
+        }
+        return reply.status(409).send({ error: 'Member already exists with these details' });
+      }
+      return reply.status(400).send({ error: dbErr.message || 'Failed to create member' });
+    }
   });
 
   // 4. Get member by ID (guards against cross-tenant lookup)
