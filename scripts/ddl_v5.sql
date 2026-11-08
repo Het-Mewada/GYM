@@ -163,16 +163,29 @@ CREATE TABLE subscriptions (
   end_date DATE NOT NULL,
   total_price_cents BIGINT NOT NULL CHECK (total_price_cents >= 0),
   discount_cents BIGINT NOT NULL DEFAULT 0 CHECK (discount_cents >= 0),
-  price_adjustment_cents BIGINT NOT NULL DEFAULT 0 CHECK (price_adjustment_cents >= 0),
   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT uq_subscriptions_gym_id UNIQUE (gym_id, id),
   CONSTRAINT fk_sub_gym_member FOREIGN KEY (gym_id, member_id) REFERENCES members(gym_id, id) ON DELETE RESTRICT,
   CONSTRAINT fk_sub_gym_plan FOREIGN KEY (gym_id, plan_id) REFERENCES membership_plans(gym_id, id) ON DELETE RESTRICT,
   CONSTRAINT check_sub_dates CHECK (end_date >= start_date),
-  CONSTRAINT check_sub_discount CHECK ((discount_cents + price_adjustment_cents) <= total_price_cents)
+  CONSTRAINT check_sub_discount CHECK (discount_cents <= total_price_cents)
 );
 CREATE INDEX idx_subscriptions_gym_member ON subscriptions(gym_id, member_id);
 CREATE INDEX idx_subscriptions_gym_end_date ON subscriptions(gym_id, end_date);
+
+-- Append-Only Price Adjustments / Goodwill Credits
+CREATE TABLE subscription_adjustments (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  gym_id UUID NOT NULL,
+  subscription_id UUID NOT NULL,
+  amount_cents BIGINT NOT NULL CHECK (amount_cents > 0),
+  reason TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  created_by_user_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  CONSTRAINT uq_sub_adjustments_gym_id UNIQUE (gym_id, id),
+  CONSTRAINT fk_adj_gym_sub FOREIGN KEY (gym_id, subscription_id) REFERENCES subscriptions(gym_id, id) ON DELETE RESTRICT
+);
+CREATE INDEX idx_sub_adjustments_gym_sub ON subscription_adjustments(gym_id, subscription_id);
 
 CREATE TABLE subscription_freezes (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -187,7 +200,8 @@ CREATE TABLE subscription_freezes (
   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT uq_subscription_freezes_gym_id UNIQUE (gym_id, id),
   CONSTRAINT fk_freeze_gym_sub FOREIGN KEY (gym_id, subscription_id) REFERENCES subscriptions(gym_id, id) ON DELETE RESTRICT,
-  CONSTRAINT check_freeze_dates CHECK (freeze_end >= freeze_start)
+  CONSTRAINT check_freeze_dates CHECK (freeze_end >= freeze_start),
+  CONSTRAINT check_days_frozen_match CHECK (days_frozen = (freeze_end - freeze_start + 1))
 );
 
 CREATE TABLE payment_transactions (
@@ -323,6 +337,10 @@ CREATE TRIGGER trg_audit_logs_immutable
 BEFORE UPDATE OR DELETE ON audit_logs
 FOR EACH ROW EXECUTE FUNCTION reject_table_mutation();
 
+CREATE TRIGGER trg_subscription_adjustments_immutable
+BEFORE UPDATE OR DELETE ON subscription_adjustments
+FOR EACH ROW EXECUTE FUNCTION reject_table_mutation();
+
 -- Guard: Subscription Overlap Prevention Trigger using two-key advisory lock
 CREATE OR REPLACE FUNCTION validate_subscription_overlap()
 RETURNS TRIGGER AS $$
@@ -331,8 +349,8 @@ DECLARE
   v_lock_key1 INT;
   v_lock_key2 INT;
 BEGIN
-  -- Bypass check if currently executing an atomic subscription shift from freeze
-  IF current_setting('app.in_freeze_shift', true) = 'true' THEN
+  -- Bypass check if executing within cascading trigger (e.g. freeze shift trigger stack)
+  IF pg_trigger_depth() > 1 THEN
     RETURN NEW;
   END IF;
 
@@ -411,28 +429,56 @@ CREATE TRIGGER trg_payment_refund_limit
 BEFORE INSERT ON payment_transactions
 FOR EACH ROW EXECUTE FUNCTION validate_refund_limit();
 
--- Guard: Refund on Active Subscription Requires Cancellation or Price Adjustment (Goodwill)
+-- Guard: Refund Semantics (Cancelled allow, Pending reject, Active require adjustment, Null pass)
 CREATE OR REPLACE FUNCTION validate_subscription_refund_semantics()
 RETURNS TRIGGER AS $$
 DECLARE
   v_sub_status VARCHAR(20);
+  v_sub_total_price BIGINT;
+  v_sub_discount BIGINT;
+  v_sub_adjustments BIGINT;
   v_sub_net_price BIGINT;
   v_sub_paid BIGINT;
 BEGIN
-  IF NEW.type IN ('refund', 'reversal') AND NEW.subscription_id IS NOT NULL THEN
-    SELECT status, (total_price_cents - discount_cents - price_adjustment_cents)
-    INTO v_sub_status, v_sub_net_price
+  IF NEW.type IN ('refund', 'reversal') THEN
+    -- Direct payment refund not tied to subscription: dues logic does not apply
+    IF NEW.subscription_id IS NULL THEN
+      RETURN NEW;
+    END IF;
+
+    SELECT status, total_price_cents, discount_cents
+    INTO v_sub_status, v_sub_total_price, v_sub_discount
     FROM subscriptions
     WHERE gym_id = NEW.gym_id AND id = NEW.subscription_id;
 
+    IF v_sub_status IS NULL THEN
+      RAISE EXCEPTION 'Subscription % not found for gym.', NEW.subscription_id;
+    END IF;
+
+    -- If subscription is cancelled, full or partial refund is always permitted
+    IF v_sub_status = 'cancelled' THEN
+      RETURN NEW;
+    END IF;
+
+    -- If subscription is pending, refunds are rejected unless cancelled
+    IF v_sub_status = 'pending' THEN
+      RAISE EXCEPTION 'Invalid refund semantics: cannot refund a pending subscription. Cancel the subscription first.';
+    END IF;
+
     IF v_sub_status = 'active' THEN
+      SELECT COALESCE(SUM(amount_cents), 0) INTO v_sub_adjustments
+      FROM subscription_adjustments
+      WHERE gym_id = NEW.gym_id AND subscription_id = NEW.subscription_id;
+
+      v_sub_net_price := v_sub_total_price - v_sub_discount - v_sub_adjustments;
+
       SELECT COALESCE(SUM(amount_cents), 0) INTO v_sub_paid
       FROM payment_transactions
       WHERE gym_id = NEW.gym_id AND subscription_id = NEW.subscription_id;
 
       -- If after this refund, total paid would drop below net price without price adjustment:
       IF (v_sub_paid + NEW.amount_cents) < v_sub_net_price THEN
-        RAISE EXCEPTION 'Invalid refund semantics: refund on active subscription requires either cancelling the subscription or recording a price adjustment (goodwill credit) so dues do not reappear.';
+        RAISE EXCEPTION 'Invalid refund semantics: refund on active subscription requires either cancelling the subscription or recording a price adjustment in subscription_adjustments so dues do not reappear.';
       END IF;
     END IF;
   END IF;
@@ -444,7 +490,7 @@ CREATE TRIGGER trg_payment_refund_semantics
 BEFORE INSERT ON payment_transactions
 FOR EACH ROW EXECUTE FUNCTION validate_subscription_refund_semantics();
 
--- Shift Rule: Freeze on Active Subscription Extends It and Shifts All Queued Renewals
+-- Shift Rule: Freeze on Active Subscription Extends It and Shifts All Queued Renewals (Uses pg_trigger_depth)
 CREATE OR REPLACE FUNCTION apply_subscription_freeze_shift()
 RETURNS TRIGGER AS $$
 DECLARE
@@ -462,9 +508,6 @@ BEGIN
       RAISE EXCEPTION 'Cannot freeze subscription with status %. Only active subscriptions may be frozen.', v_sub_status;
     END IF;
 
-    -- Set session flag to bypass overlap trigger during atomic shift
-    PERFORM set_config('app.in_freeze_shift', 'true', true);
-
     -- 1. Shift all subsequent queued subscriptions forward by days_frozen
     UPDATE subscriptions
     SET start_date = start_date + NEW.days_frozen,
@@ -478,9 +521,6 @@ BEGIN
     UPDATE subscriptions
     SET end_date = end_date + NEW.days_frozen
     WHERE gym_id = NEW.gym_id AND id = NEW.subscription_id;
-
-    -- Reset session flag
-    PERFORM set_config('app.in_freeze_shift', 'false', true);
   END IF;
   RETURN NEW;
 END;
@@ -489,8 +529,6 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER trg_subscription_freeze_shift
 AFTER INSERT ON subscription_freezes
 FOR EACH ROW EXECUTE FUNCTION apply_subscription_freeze_shift();
-
--- ============================================================================
 -- 5. ROW LEVEL SECURITY (RLS) POLICIES
 -- ============================================================================
 
@@ -553,6 +591,13 @@ CREATE POLICY rls_members ON members
 ALTER TABLE subscriptions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE subscriptions FORCE ROW LEVEL SECURITY;
 CREATE POLICY rls_subscriptions ON subscriptions
+  FOR ALL TO app_user
+  USING (gym_id = NULLIF(current_setting('app.gym_id', true), '')::uuid)
+  WITH CHECK (gym_id = NULLIF(current_setting('app.gym_id', true), '')::uuid);
+
+ALTER TABLE subscription_adjustments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE subscription_adjustments FORCE ROW LEVEL SECURITY;
+CREATE POLICY rls_subscription_adjustments ON subscription_adjustments
   FOR ALL TO app_user
   USING (gym_id = NULLIF(current_setting('app.gym_id', true), '')::uuid)
   WITH CHECK (gym_id = NULLIF(current_setting('app.gym_id', true), '')::uuid);
@@ -984,8 +1029,8 @@ REVOKE ALL ON users, tenants FROM app_user;
 -- Grants on tenant-scoped tables
 GRANT SELECT, INSERT, UPDATE, DELETE ON members, membership_plans, subscriptions, subscription_freezes, csv_import_jobs, staff_invitations, user_gym_memberships TO app_user;
 GRANT SELECT, INSERT, UPDATE ON refresh_tokens TO app_user;
-GRANT SELECT, INSERT ON payment_transactions, attendance_logs, notification_logs, audit_logs TO app_user;
-REVOKE UPDATE, DELETE, TRUNCATE ON payment_transactions, attendance_logs, audit_logs, notification_logs FROM app_user;
+GRANT SELECT, INSERT ON payment_transactions, attendance_logs, notification_logs, audit_logs, subscription_adjustments TO app_user;
+REVOKE UPDATE, DELETE, TRUNCATE ON payment_transactions, attendance_logs, audit_logs, notification_logs, subscription_adjustments FROM app_user;
 
 -- Grants for retention_worker role
 GRANT SELECT, DELETE ON notification_logs, csv_import_jobs TO retention_worker;

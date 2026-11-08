@@ -34,12 +34,19 @@ async function runTest() {
     `, [gymId, testPhone]);
     memberId = memRes.rows[0].id;
 
-    // Set price_adjustment_cents to 5000 so refund semantics allow refunds up to 5000+ cents
-    const subRes = await setupClient.query(`
-      INSERT INTO subscriptions (gym_id, member_id, plan_id, status, start_date, end_date, total_price_cents, price_adjustment_cents)
-      VALUES ($1, $2, $3, 'active', CURRENT_DATE, CURRENT_DATE + 30, 5000, 5000) RETURNING id;
-    `, [gymId, memberId, planRes.rows[0].id]);
+    // Record price adjustment in subscription_adjustments so refund semantics allow refunds
+    const subRes = await setupClient.query(
+      `INSERT INTO subscriptions (gym_id, member_id, plan_id, status, start_date, end_date, total_price_cents)
+       VALUES ($1, $2, $3, 'active', CURRENT_DATE, CURRENT_DATE + 30, 5000) RETURNING id;`,
+      [gymId, memberId, planRes.rows[0].id]
+    );
     subId = subRes.rows[0].id;
+
+    await setupClient.query(
+      `INSERT INTO subscription_adjustments (gym_id, subscription_id, amount_cents, reason, created_by_user_id)
+       VALUES ($1, $2, 5000, 'Concurrency Test Adjustment', $3);`,
+      [gymId, subId, userId]
+    );
 
     const receipt = await setupClient.query(`SELECT generate_next_receipt_number($1) as r;`, [gymId]);
     const payRes = await setupClient.query(`

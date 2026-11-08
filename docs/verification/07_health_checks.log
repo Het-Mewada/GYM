@@ -1,4 +1,4 @@
---- API Container Health (http://localhost:4000/health) ---
+--- API Container Health (http://127.0.0.1:4000/health) ---
 {
     "status":  "ok",
     "service":  "gym-api",
@@ -6,12 +6,12 @@
                      "status":  "healthy",
                      "role":  "app_user"
                  },
-    "timestamp":  "2026-11-08T08:25:02.252Z"
+    "timestamp":  "2026-11-08T09:07:34.461Z"
 }
 
---- Web Container Health (http://localhost:3000/api/health) ---
+--- Web Container Health (http://127.0.0.1:3000/api/health) ---
 {
     "status":  "ok",
     "service":  "gym-web",
-    "timestamp":  "2026-11-08T08:25:06.434Z"
+    "timestamp":  "2026-11-08T09:07:44.780Z"
 }

@@ -307,10 +307,18 @@ EXCEPTION WHEN OTHERS THEN
   RAISE NOTICE 'SUCCESS: Refund on active subscription rejected without price adjustment: %', SQLERRM;
 END $$;
 
--- (b) Apply price adjustment (goodwill credit of ₹20 / 2000 cents) so dues do not reappear
-UPDATE subscriptions
-SET price_adjustment_cents = 2000
-WHERE id = '11111111-c002-0002-0002-000000000002';
+-- (b) Apply price adjustment into append-only subscription_adjustments table
+INSERT INTO subscription_adjustments (id, gym_id, subscription_id, amount_cents, reason, created_by_user_id)
+VALUES ('11111111-a002-0002-0002-000000000002', :'g1_id', '11111111-c002-0002-0002-000000000002', 2000, 'Goodwill credit', :'u1_id');
+
+-- Immutability check: direct UPDATE on subscription_adjustments must fail
+DO $$
+BEGIN
+  UPDATE subscription_adjustments SET amount_cents = 3000 WHERE id = '11111111-a002-0002-0002-000000000002';
+  RAISE EXCEPTION 'Security failure: updated immutable subscription_adjustments!';
+EXCEPTION WHEN OTHERS THEN
+  RAISE NOTICE 'SUCCESS: UPDATE on subscription_adjustments rejected: %', SQLERRM;
+END $$;
 
 -- Now refund of 2000 cents succeeds
 INSERT INTO payment_transactions (id, gym_id, member_id, subscription_id, idempotency_key, receipt_number, type, method, amount_cents, parent_transaction_id, effective_date, recorded_by_user_id)
@@ -324,15 +332,20 @@ WHERE gym_id = :'g1_id'
   AND effective_date BETWEEN '2026-11-01' AND '2026-11-30';
 -- MUST BE 3000 (5000 payment - 2000 refund; 5000 opening_balance excluded)
 
--- Dues Calculation Query: Outstanding dues for Vikram MUST be 0 (goodwill refund did not create dues)
+-- Dues Calculation Query: joins subscription_adjustments to compute net_price
 SELECT 
   s.id AS subscription_id,
   m.first_name,
-  (s.total_price_cents - s.discount_cents - s.price_adjustment_cents) AS net_price,
+  (s.total_price_cents - s.discount_cents - COALESCE(adj.adj_cents, 0)) AS net_price,
   COALESCE(p.paid_cents, 0) AS total_paid_and_opening,
-  GREATEST(0, (s.total_price_cents - s.discount_cents - s.price_adjustment_cents) - COALESCE(p.paid_cents, 0)) AS outstanding_due
+  GREATEST(0, (s.total_price_cents - s.discount_cents - COALESCE(adj.adj_cents, 0)) - COALESCE(p.paid_cents, 0)) AS outstanding_due
 FROM subscriptions s
 JOIN members m ON m.id = s.member_id AND m.gym_id = s.gym_id
+LEFT JOIN (
+  SELECT gym_id, subscription_id, SUM(amount_cents) AS adj_cents
+  FROM subscription_adjustments
+  GROUP BY gym_id, subscription_id
+) adj ON adj.gym_id = s.gym_id AND adj.subscription_id = s.id
 LEFT JOIN (
   SELECT gym_id, subscription_id, SUM(amount_cents) AS paid_cents
   FROM payment_transactions
@@ -341,6 +354,35 @@ LEFT JOIN (
 ) p ON p.gym_id = s.gym_id AND p.subscription_id = s.id
 WHERE s.gym_id = :'g1_id'
 ORDER BY m.first_name;
+
+-- (c) Test Refund on Pending Subscription (Must Fail)
+INSERT INTO subscriptions (id, gym_id, member_id, plan_id, status, start_date, end_date, total_price_cents)
+VALUES ('11111111-c009-0009-0009-000000000009', :'g1_id', '11111111-e001-0001-0001-000000000001', '11111111-b001-0001-0001-000000000001', 'pending', '2026-12-01', '2026-12-31', 5000);
+
+DO $$
+DECLARE
+  v_g1 UUID := current_setting('test.g1_id')::uuid;
+  v_u1 UUID := current_setting('test.u1_id')::uuid;
+BEGIN
+  INSERT INTO payment_transactions (gym_id, member_id, subscription_id, idempotency_key, receipt_number, type, method, amount_cents, parent_transaction_id, effective_date, recorded_by_user_id)
+  VALUES (v_g1, '11111111-e001-0001-0001-000000000001', '11111111-c009-0009-0009-000000000009', gen_random_uuid(), 'REC-PEND-REF', 'refund', 'cash', -1000, '11111111-f001-0001-0001-000000000001', '2026-11-04', v_u1);
+  RAISE EXCEPTION 'Refund semantics failed: allowed refund on pending subscription!';
+EXCEPTION WHEN OTHERS THEN
+  RAISE NOTICE 'SUCCESS: Refund on pending subscription rejected: %', SQLERRM;
+END $$;
+
+-- (d) Test Refund on Cancelled Subscription (Must Succeed)
+UPDATE subscriptions SET status = 'cancelled' WHERE id = '11111111-c009-0009-0009-000000000009';
+
+INSERT INTO payment_transactions (id, gym_id, member_id, subscription_id, idempotency_key, receipt_number, type, method, amount_cents, parent_transaction_id, effective_date, recorded_by_user_id)
+VALUES ('11111111-f009-0009-0009-000000000009', :'g1_id', '11111111-e001-0001-0001-000000000001', '11111111-c009-0009-0009-000000000009', gen_random_uuid(), 'REC-CANC-REF', 'refund', 'cash', -1000, '11111111-f001-0001-0001-000000000001', '2026-11-04', :'u1_id');
+
+-- (e) Test Refund with subscription_id IS NULL (e.g. general fee / merchandise refund) (Must Succeed)
+INSERT INTO payment_transactions (id, gym_id, member_id, subscription_id, idempotency_key, receipt_number, type, method, amount_cents, effective_date, recorded_by_user_id)
+VALUES ('11111111-f010-0010-0010-000000000010', :'g1_id', '11111111-e001-0001-0001-000000000001', NULL, gen_random_uuid(), 'REC-FEE-001', 'payment', 'cash', 2000, '2026-11-04', :'u1_id');
+
+INSERT INTO payment_transactions (id, gym_id, member_id, subscription_id, idempotency_key, receipt_number, type, method, amount_cents, parent_transaction_id, effective_date, recorded_by_user_id)
+VALUES ('11111111-f011-0011-0011-000000000011', :'g1_id', '11111111-e001-0001-0001-000000000001', NULL, gen_random_uuid(), 'REC-FEE-REF', 'refund', 'cash', -1000, '11111111-f010-0010-0010-000000000010', '2026-11-04', :'u1_id');
 
 -- ============================================================================
 -- 10. FREEZE SHIFT RULE ON QUEUED RENEWALS (Gate item 3)
@@ -354,7 +396,21 @@ VALUES
   ('11111111-c003-0003-0003-000000000003', :'g1_id', '11111111-e003-0003-0003-000000000003', '11111111-b001-0001-0001-000000000001', 'active', '2026-11-01', '2026-11-10', 5000),
   ('11111111-c004-0004-0004-000000000004', :'g1_id', '11111111-e003-0003-0003-000000000003', '11111111-b001-0001-0001-000000000001', 'queued', '2026-11-11', '2026-12-10', 5000);
 
--- Insert 10-day freeze on active subscription
+-- (a) Test check_days_frozen_match constraint: mismatched days_frozen must fail
+DO $$
+DECLARE
+  v_g1 UUID := current_setting('test.g1_id')::uuid;
+  v_u1 UUID := current_setting('test.u1_id')::uuid;
+BEGIN
+  -- freeze_start 2026-11-05 to 2026-11-14 is 10 days, but passing 5 days
+  INSERT INTO subscription_freezes (gym_id, subscription_id, freeze_start, freeze_end, days_frozen, reason, approved_by_user_id)
+  VALUES (v_g1, '11111111-c003-0003-0003-000000000003', '2026-11-05', '2026-11-14', 5, 'Bad days', v_u1);
+  RAISE EXCEPTION 'Constraint failure: allowed mismatched days_frozen!';
+EXCEPTION WHEN check_violation THEN
+  RAISE NOTICE 'SUCCESS: check_days_frozen_match rejected mismatched days_frozen.';
+END $$;
+
+-- (b) Insert 10-day freeze on active subscription with matching days_frozen (10)
 INSERT INTO subscription_freezes (gym_id, subscription_id, freeze_start, freeze_end, days_frozen, reason, approved_by_user_id)
 VALUES (:'g1_id', '11111111-c003-0003-0003-000000000003', '2026-11-05', '2026-11-14', 10, 'Medical sprain', :'u1_id');
 
@@ -420,7 +476,7 @@ VALUES ('11111111-c014-0000-0000-000000000004', :'g1_id', '11111111-e012-0000-00
 
 -- Member 3 has active freeze covering 2026-11-05 to 2026-11-15
 INSERT INTO subscription_freezes (gym_id, subscription_id, freeze_start, freeze_end, days_frozen, reason, approved_by_user_id)
-VALUES (:'g1_id', '11111111-c013-0000-0000-000000000003', '2026-11-05', '2026-11-15', 10, 'Medical travel', :'u1_id');
+VALUES (:'g1_id', '11111111-c013-0000-0000-000000000003', '2026-11-05', '2026-11-15', 11, 'Medical travel', :'u1_id');
 
 -- Timezone Boundary Evaluation:
 -- Gym timezone is Asia/Kolkata (+05:30)
