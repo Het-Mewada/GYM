@@ -6,7 +6,7 @@ import { type Member, type CreateMemberInput, fetchMembers, createMember } from 
 
 const DEFAULT_DEMO_GYM_ID = '00000000-0000-0000-0000-000000000001';
 
-// Seed members for standalone / preview demonstration
+// Seed members for preview demonstration
 const INITIAL_DEMO_MEMBERS: Member[] = [
   {
     id: 'mem-001',
@@ -63,6 +63,8 @@ const INITIAL_DEMO_MEMBERS: Member[] = [
 
 export default function MembersPage() {
   const [gymId, setGymId] = useState<string>(DEFAULT_DEMO_GYM_ID);
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [userName, setUserName] = useState<string | null>(null);
   const [members, setMembers] = useState<Member[]>(INITIAL_DEMO_MEMBERS);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive'>('all');
@@ -84,53 +86,67 @@ export default function MembersPage() {
   const [emergencyContactName, setEmergencyContactName] = useState('');
   const [emergencyContactPhone, setEmergencyContactPhone] = useState('');
 
-  // Load from localStorage or environment if available
+  // Check auth session on mount
   useEffect(() => {
     if (typeof window !== 'undefined') {
+      const token = localStorage.getItem('access_token');
       const storedGymId = localStorage.getItem('gym_id');
-      if (storedGymId) {
-        setGymId(storedGymId);
+      const storedName = localStorage.getItem('user_name');
+      if (token) {
+        setIsAuthenticated(true);
+        if (storedName) setUserName(storedName);
+        if (storedGymId) setGymId(storedGymId);
+      } else {
+        setIsAuthenticated(false);
       }
     }
   }, []);
 
-  // Fetch members from API with fallback to client-side filter
+  // Fetch members from live backend only when authenticated
   const loadMembers = useCallback(async () => {
+    if (typeof window === 'undefined') return;
+    const token = localStorage.getItem('access_token');
+
+    // In unauthenticated preview mode, do not fire network request to avoid 401
+    if (!token) {
+      setIsLoading(false);
+      return;
+    }
+
     setIsLoading(true);
     setError(null);
     try {
-      const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined;
       const res = await fetchMembers(gymId, { q: searchQuery, status: statusFilter }, token);
       if (res && Array.isArray(res.members)) {
         setMembers(res.members);
       }
-    } catch {
-      // Fallback for standalone dev / test environment without live backend:
-      // Perform in-memory filter on seeded members
-      setMembers((prev) => {
-        const pool = prev.length ? prev : INITIAL_DEMO_MEMBERS;
-        return pool.filter((m) => {
-          if (statusFilter !== 'all' && m.status !== statusFilter) return false;
-          if (!searchQuery.trim()) return true;
-          const q = searchQuery.toLowerCase().trim();
-          const fullName = `${m.firstName} ${m.lastName || ''}`.toLowerCase();
-          const phoneMatch = m.phone.toLowerCase().includes(q);
-          const numMatch = m.memberNumber.toLowerCase().includes(q);
-          const nameMatch = fullName.includes(q);
-          return nameMatch || phoneMatch || numMatch;
-        });
-      });
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to fetch members from server');
     } finally {
       setIsLoading(false);
     }
   }, [gymId, searchQuery, statusFilter]);
 
   useEffect(() => {
-    const timer = setTimeout(() => {
-      loadMembers();
-    }, 150);
-    return () => clearTimeout(timer);
-  }, [loadMembers]);
+    if (isAuthenticated) {
+      const timer = setTimeout(() => {
+        loadMembers();
+      }, 150);
+      return () => clearTimeout(timer);
+    }
+  }, [isAuthenticated, loadMembers]);
+
+  const handleLogout = () => {
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem('access_token');
+      localStorage.removeItem('user_name');
+      localStorage.removeItem('gym_id');
+    }
+    setIsAuthenticated(false);
+    setUserName(null);
+    setGymId(DEFAULT_DEMO_GYM_ID);
+    setMembers(INITIAL_DEMO_MEMBERS);
+  };
 
   // Handle Form Submission
   const handleCreateMember = async (e: React.FormEvent) => {
@@ -160,10 +176,36 @@ export default function MembersPage() {
 
     try {
       const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined;
-      const res = await createMember(gymId, input, token);
-      if (res && res.member) {
-        setMembers((prev) => [res.member, ...prev]);
+
+      if (token) {
+        // Authenticated live mode: write to Postgres via Fastify
+        const res = await createMember(gymId, input, token);
+        if (res && res.member) {
+          setMembers((prev) => [res.member, ...prev]);
+        }
+      } else {
+        // Client preview mode: generate local member
+        const newSeq = (members.length + 1).toString().padStart(5, '0');
+        const localMember: Member = {
+          id: `mem-${Date.now()}`,
+          gymId,
+          memberNumber: `MEM-${newSeq}`,
+          firstName: input.firstName,
+          lastName: input.lastName || null,
+          phone: input.phone,
+          email: input.email || null,
+          gender: input.gender || 'unspecified',
+          dateOfBirth: input.dateOfBirth || null,
+          emergencyContactName: input.emergencyContactName || null,
+          emergencyContactPhone: input.emergencyContactPhone || null,
+          status: 'active',
+          joinedDate: new Date().toISOString().split('T')[0],
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        };
+        setMembers((prev) => [localMember, ...prev]);
       }
+
       // Reset form and close modal
       setFirstName('');
       setLastName('');
@@ -174,42 +216,20 @@ export default function MembersPage() {
       setEmergencyContactName('');
       setEmergencyContactPhone('');
       setIsModalOpen(false);
-    } catch {
-      // In standalone / client mock mode, generate local member
-      const newSeq = (members.length + 1).toString().padStart(5, '0');
-      const localMember: Member = {
-        id: `mem-${Date.now()}`,
-        gymId,
-        memberNumber: `MEM-${newSeq}`,
-        firstName: input.firstName,
-        lastName: input.lastName || null,
-        phone: input.phone,
-        email: input.email || null,
-        gender: input.gender || 'unspecified',
-        dateOfBirth: input.dateOfBirth || null,
-        emergencyContactName: input.emergencyContactName || null,
-        emergencyContactPhone: input.emergencyContactPhone || null,
-        status: 'active',
-        joinedDate: new Date().toISOString().split('T')[0],
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-      };
-      setMembers((prev) => [localMember, ...prev]);
-      setFirstName('');
-      setLastName('');
-      setPhone('');
-      setEmail('');
-      setGender('unspecified');
-      setDateOfBirth('');
-      setEmergencyContactName('');
-      setEmergencyContactPhone('');
-      setIsModalOpen(false);
+    } catch (err: unknown) {
+      setFormError(err instanceof Error ? err.message : 'Failed to create member');
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  const filteredMembers = useMemo(() => {
+  // Filtered members list
+  const displayedMembers = useMemo(() => {
+    if (isAuthenticated) {
+      // Backend handles search and status filtering via SQL
+      return members;
+    }
+    // Preview mode: filter in-memory
     return members.filter((m) => {
       if (statusFilter !== 'all' && m.status !== statusFilter) return false;
       if (!searchQuery.trim()) return true;
@@ -220,7 +240,7 @@ export default function MembersPage() {
       const nameMatch = fullName.includes(q);
       return nameMatch || phoneMatch || numMatch;
     });
-  }, [members, searchQuery, statusFilter]);
+  }, [isAuthenticated, members, searchQuery, statusFilter]);
 
   const activeCount = useMemo(() => {
     return members.filter((m) => m.status === 'active').length;
@@ -242,23 +262,67 @@ export default function MembersPage() {
             </Link>
             <span className="text-neutral-600">/</span>
             <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-neutral-800 text-neutral-300 border border-neutral-700">
-              Tenanted Pod
+              {isAuthenticated ? 'Live Multi-Tenant Pod' : 'Preview Pod'}
             </span>
           </div>
 
-          <nav className="flex items-center space-x-4 text-sm font-medium">
-            <Link href="/" className="text-neutral-400 hover:text-white transition">
-              Overview
-            </Link>
-            <Link href="/members" className="text-emerald-400 font-semibold border-b-2 border-emerald-400 pb-1">
-              Members
-            </Link>
-          </nav>
+          <div className="flex items-center space-x-6">
+            <nav className="flex items-center space-x-4 text-sm font-medium">
+              <Link href="/" className="text-neutral-400 hover:text-white transition">
+                Overview
+              </Link>
+              <Link href="/members" className="text-emerald-400 font-semibold border-b-2 border-emerald-400 pb-1">
+                Members
+              </Link>
+            </nav>
+
+            <div className="flex items-center pl-4 border-l border-neutral-800">
+              {isAuthenticated ? (
+                <div className="flex items-center space-x-3">
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-950/80 text-emerald-400 border border-emerald-800">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    {userName || 'Gym Staff'}
+                  </span>
+                  <button
+                    onClick={handleLogout}
+                    className="text-xs text-neutral-400 hover:text-white transition px-2.5 py-1 rounded-lg border border-neutral-800 hover:bg-neutral-800 cursor-pointer"
+                  >
+                    Sign Out
+                  </button>
+                </div>
+              ) : (
+                <Link
+                  href="/login"
+                  className="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-black text-xs font-semibold transition shadow-md shadow-emerald-950/40"
+                >
+                  Sign In
+                </Link>
+              )}
+            </div>
+          </div>
         </div>
       </header>
 
       {/* Main Content Area */}
       <main className="max-w-7xl mx-auto px-6 py-8 flex-1 w-full space-y-6">
+        {/* Preview Mode Notice Banner */}
+        {!isAuthenticated && (
+          <div data-testid="preview-mode-banner" className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 rounded-xl border border-emerald-900/60 bg-emerald-950/20 text-emerald-200 text-xs">
+            <div className="flex items-center gap-2.5">
+              <span className="flex h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+              <span>
+                <strong>Preview Mode:</strong> Viewing local mock data. Sign in with your gym staff account to sync with the PostgreSQL cloud database.
+              </span>
+            </div>
+            <Link
+              href="/login"
+              className="inline-flex items-center justify-center px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-black font-semibold text-xs transition whitespace-nowrap"
+            >
+              Sign In (Demo Account Available)
+            </Link>
+          </div>
+        )}
+
         {/* Header Title & Actions */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
@@ -288,12 +352,14 @@ export default function MembersPage() {
           </div>
         </div>
 
-        {/* Quick Stats Cards */}
+        {/* Error Alert */}
         {error && (
           <div className="p-3 rounded-lg bg-red-950/80 border border-red-800 text-red-200 text-xs font-medium">
             {error}
           </div>
         )}
+
+        {/* Quick Stats Cards */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div className="border border-neutral-800/80 bg-neutral-900/40 p-4 rounded-xl">
             <div className="text-xs font-medium text-neutral-400 uppercase tracking-wider">Total Members</div>
@@ -305,7 +371,7 @@ export default function MembersPage() {
           </div>
           <div className="border border-neutral-800/80 bg-neutral-900/40 p-4 rounded-xl">
             <div className="text-xs font-medium text-neutral-400 uppercase tracking-wider">Current Search Match</div>
-            <div className="text-2xl font-bold text-neutral-200 mt-1">{filteredMembers.length}</div>
+            <div className="text-2xl font-bold text-neutral-200 mt-1">{displayedMembers.length}</div>
           </div>
         </div>
 
@@ -380,7 +446,7 @@ export default function MembersPage() {
                       Loading members directory...
                     </td>
                   </tr>
-                ) : filteredMembers.length === 0 ? (
+                ) : displayedMembers.length === 0 ? (
                   <tr>
                     <td colSpan={6} className="px-6 py-16 text-center" data-testid="empty-state">
                       <div className="flex flex-col items-center justify-center space-y-3">
@@ -401,7 +467,7 @@ export default function MembersPage() {
                     </td>
                   </tr>
                 ) : (
-                  filteredMembers.map((member) => (
+                  displayedMembers.map((member) => (
                     <tr
                       key={member.id}
                       data-testid={`member-row-${member.id}`}

@@ -34,6 +34,20 @@ export interface MembersResponse {
   offset?: number;
 }
 
+export interface LoginResponse {
+  accessToken: string;
+  user: {
+    id: string;
+    fullName: string;
+    isPlatformAdmin: boolean;
+  };
+  memberships: Array<{
+    gym_id: string;
+    role: string;
+    is_active: boolean;
+  }>;
+}
+
 const getApiBaseUrl = () => {
   if (typeof window !== 'undefined') {
     return process.env.NEXT_PUBLIC_API_URL || '/api/backend';
@@ -41,11 +55,33 @@ const getApiBaseUrl = () => {
   return process.env.API_URL || 'http://127.0.0.1:4000/api';
 };
 
+export async function loginUser(phone: string, password: string): Promise<LoginResponse> {
+  const url = `${getApiBaseUrl()}/auth/login`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ phone, password })
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(errorBody.error || `Login failed: ${res.statusText}`);
+  }
+
+  return res.json();
+}
+
 export async function fetchMembers(
   gymId: string,
   params: { q?: string; status?: string; limit?: number; offset?: number } = {},
   token?: string
 ): Promise<MembersResponse> {
+  const activeToken = token || (typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined);
+
+  if (!activeToken) {
+    throw new Error('Authentication required');
+  }
+
   const query = new URLSearchParams();
   if (params.q) query.set('q', params.q);
   if (params.status && params.status !== 'all') query.set('status', params.status);
@@ -54,11 +90,9 @@ export async function fetchMembers(
 
   const url = `${getApiBaseUrl()}/gyms/${gymId}/members${query.toString() ? '?' + query.toString() : ''}`;
   const headers: Record<string, string> = {
-    'Content-Type': 'application/json'
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${activeToken}`
   };
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
-  }
 
   const res = await fetch(url, { headers });
   if (!res.ok) {
@@ -74,13 +108,17 @@ export async function createMember(
   input: CreateMemberInput,
   token?: string
 ): Promise<{ member: Member }> {
+  const activeToken = token || (typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined);
+
+  if (!activeToken) {
+    throw new Error('Authentication required');
+  }
+
   const url = `${getApiBaseUrl()}/gyms/${gymId}/members`;
   const headers: Record<string, string> = {
-    'Content-Type': 'application/json'
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${activeToken}`
   };
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
-  }
 
   const res = await fetch(url, {
     method: 'POST',

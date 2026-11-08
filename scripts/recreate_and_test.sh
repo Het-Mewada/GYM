@@ -41,6 +41,7 @@ fi
 
 log "\n>>> STEP 4: Applying DDL v5 to PostgreSQL 16"
 docker exec -i gym-postgres psql -U postgres -d gym_saas_dev < scripts/ddl_v5.sql | tee docs/verification/02_schema_apply_v5.log | tee -a "$master_log"
+docker exec -i gym-postgres psql -U postgres -d gym_saas_dev < scripts/seed_demo_user.sql | tee -a "$master_log"
 
 log "\n>>> STEP 5: Executing Catalog Tests (Must all return 0 rows)"
 docker exec -i gym-postgres psql -U postgres -d gym_saas_dev -c "

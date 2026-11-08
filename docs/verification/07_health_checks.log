@@ -6,12 +6,12 @@
                      "status":  "healthy",
                      "role":  "app_user"
                  },
-    "timestamp":  "2026-11-08T11:25:20.290Z"
+    "timestamp":  "2026-11-08T13:57:16.021Z"
 }
 
 --- Web Container Health (http://127.0.0.1:3000/api/health) ---
 {
     "status":  "ok",
     "service":  "gym-web",
-    "timestamp":  "2026-11-08T11:25:20.454Z"
+    "timestamp":  "2026-11-08T13:57:16.199Z"
 }

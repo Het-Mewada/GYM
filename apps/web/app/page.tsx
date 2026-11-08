@@ -14,7 +14,7 @@ export default function HomePage() {
           Multi-tenant front-desk operations, automated subscription billing, and real-time attendance engine.
         </p>
 
-        <div className="mb-6">
+        <div className="flex flex-col sm:flex-row items-center justify-center gap-3 mb-6">
           <Link
             href="/members"
             data-testid="members-directory-link"
@@ -24,6 +24,12 @@ export default function HomePage() {
             <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
             </svg>
+          </Link>
+          <Link
+            href="/login"
+            className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-white font-medium text-sm transition border border-neutral-700"
+          >
+            Sign In / Demo Login
           </Link>
         </div>
 

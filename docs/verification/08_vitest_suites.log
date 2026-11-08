@@ -1,83 +1,84 @@
 
-   • turbo 2.11.10
-   • Packages in scope: @gym/api, @gym/db, @gym/shared, @gym/web
-   • Running test in 4 packages
-   • Remote caching disabled
+   ΓÇó turbo 2.11.10
+   ΓÇó Packages in scope: @gym/api, @gym/db, @gym/shared, @gym/web
+   ΓÇó Running test in 4 packages
+   ΓÇó Remote caching disabled
 
-@gym/db:test: cache bypass, force executing 0fe9d4da275dc88a
-@gym/shared:test: cache bypass, force executing ee3d7f2dbd2d369f
-@gym/db:build: cache bypass, force executing a64114d77ade6777
-@gym/shared:build: cache bypass, force executing b848b3f31b7e1e95
-@gym/db:test: $ vitest run
+@gym/shared:test: cache bypass, force executing 5e5140ac20117719
+@gym/db:build: cache bypass, force executing 613457a54859cbdc
+@gym/shared:build: cache bypass, force executing 2eb0990a480a50a0
+@gym/db:test: cache bypass, force executing 53b423fda72df2a7
 @gym/shared:test: $ vitest run
 @gym/db:build: $ tsc
 @gym/shared:build: $ tsc
-@gym/db:test: 
-@gym/db:test: [1m[30m[46m RUN [49m[39m[22m [36mv5.1.0 [39m[90mC:/Users/Mewada Het/Desktop/GYM/packages/db[39m
-@gym/db:test: 
+@gym/db:test: $ vitest run
 @gym/shared:test: 
 @gym/shared:test: [1m[30m[46m RUN [49m[39m[22m [36mv5.1.0 [39m[90mC:/Users/Mewada Het/Desktop/GYM/packages/shared[39m
 @gym/shared:test: 
-@gym/shared:test:  [32m✓[39m src/schemas/schemas.test.ts [2m([22m[2m2 tests[22m[2m)[22m[32m 15[2mms[22m[39m
-@gym/shared:test:  [32m✓[39m dist/schemas/schemas.test.js [2m([22m[2m2 tests[22m[2m)[22m[32m 19[2mms[22m[39m
+@gym/db:test: 
+@gym/db:test: [1m[30m[46m RUN [49m[39m[22m [36mv5.1.0 [39m[90mC:/Users/Mewada Het/Desktop/GYM/packages/db[39m
+@gym/db:test: 
+@gym/shared:test:  [32mΓ£ô[39m src/schemas/schemas.test.ts [2m([22m[2m2 tests[22m[2m)[22m[32m 14[2mms[22m[39m
+@gym/shared:test:  [32mΓ£ô[39m dist/schemas/schemas.test.js [2m([22m[2m2 tests[22m[2m)[22m[32m 14[2mms[22m[39m
 @gym/shared:test: 
 @gym/shared:test: [2m Test Files [22m [1m[32m2 passed[39m[22m[90m (2)[39m
 @gym/shared:test: [2m      Tests [22m [1m[32m4 passed[39m[22m[90m (4)[39m
-@gym/shared:test: [2m   Start at [22m 16:55:22
-@gym/shared:test: [2m   Duration [22m 1.16s[2m (import 83%, transform 10%, worker 4%, tests 3%)[22m
+@gym/shared:test: [2m   Start at [22m 19:27:19
+@gym/shared:test: [2m   Duration [22m 1.73s[2m (import 73%, transform 23%, worker 2%, tests 2%)[22m
 @gym/shared:test: 
-@gym/web:test: cache bypass, force executing 622bef34839b1ee2
+@gym/web:test: cache bypass, force executing c16ca00110ac4fdd
 @gym/web:test: $ vitest run
-@gym/db:test:  [32m✓[39m test/concurrency.test.ts [2m([22m[2m2 tests[22m[2m)[22m[33m 3040[2mms[22m[39m
-@gym/db:test:    [32m✓[39m Concurrency & Race Condition Verification Suite [2m(2)[22m
-@gym/db:test:      [33m[2m✓[22m[39m executes refund concurrency test with control race and guarded run[33m 1672[2mms[22m[39m
-@gym/db:test:      [33m[2m✓[22m[39m executes overlap concurrency test with control race and guarded run[33m 1363[2mms[22m[39m
+@gym/db:test:  [32mΓ£ô[39m test/concurrency.test.ts [2m([22m[2m2 tests[22m[2m)[22m[33m 2090[2mms[22m[39m
+@gym/db:test:    [32mΓ£ô[39m Concurrency & Race Condition Verification Suite [2m(2)[22m
+@gym/db:test:      [33m[2mΓ£ô[22m[39m executes refund concurrency test with control race and guarded run[33m 1094[2mms[22m[39m
+@gym/db:test:      [33m[2mΓ£ô[22m[39m executes overlap concurrency test with control race and guarded run[33m 991[2mms[22m[39m
 @gym/web:test: 
 @gym/web:test: [1m[30m[46m RUN [49m[39m[22m [36mv5.1.0 [39m[90mC:/Users/Mewada Het/Desktop/GYM/apps/web[39m
 @gym/web:test: 
-@gym/api:test: cache bypass, force executing 723b214ceb693fd9
+@gym/api:test: cache bypass, force executing 26c86af63bf49fe7
 @gym/api:test: $ vitest run
-@gym/web:test:  [32m✓[39m test/smoke.test.ts [2m([22m[2m1 test[22m[2m)[22m[32m 9[2mms[22m[39m
+@gym/web:test:  [32mΓ£ô[39m test/smoke.test.ts [2m([22m[2m1 test[22m[2m)[22m[32m 6[2mms[22m[39m
 @gym/web:test: 
 @gym/web:test: [2m Test Files [22m [1m[32m1 passed[39m[22m[90m (1)[39m
 @gym/web:test: [2m      Tests [22m [1m[32m1 passed[39m[22m[90m (1)[39m
-@gym/web:test: [2m   Start at [22m 16:55:26
-@gym/web:test: [2m   Duration [22m 658ms[2m (import 52%, worker 20%, transform 18%, tests 10%)[22m
+@gym/web:test: [2m   Start at [22m 19:27:23
+@gym/web:test: [2m   Duration [22m 543ms[2m (transform 43%, import 35%, worker 15%, tests 7%, environment 1%)[22m
 @gym/web:test: 
 @gym/api:test: 
 @gym/api:test: [1m[30m[46m RUN [49m[39m[22m [36mv5.1.0 [39m[90mC:/Users/Mewada Het/Desktop/GYM/apps/api[39m
 @gym/api:test: 
-@gym/api:test:  [32m✓[39m test/jwt.test.ts [2m([22m[2m5 tests[22m[2m)[22m[32m 44[2mms[22m[39m
-@gym/db:test:  [32m✓[39m test/comprehensive_security.test.ts [2m([22m[2m12 tests[22m[2m)[22m[33m 996[2mms[22m[39m
-@gym/db:test:  [32m✓[39m test/drift.test.ts [2m([22m[2m2 tests[22m[2m)[22m[32m 172[2mms[22m[39m
-@gym/api:test:  [32m✓[39m test/app.test.ts [2m([22m[2m2 tests[22m[2m)[22m[33m 985[2mms[22m[39m
-@gym/api:test:    [32m✓[39m Fastify API Test Harness & DB Startup Assertion [2m(2)[22m
-@gym/api:test:      [33m[2m✓[22m[39m responds with status ok on /health[33m 814[2mms[22m[39m
-@gym/api:test:  [32m✓[39m test/route_registry.test.ts [2m([22m[2m5 tests[22m[2m)[22m[33m 1611[2mms[22m[39m
-@gym/api:test:  [32m✓[39m test/cross_tenant.test.ts [2m([22m[2m7 tests[22m[2m)[22m[33m 1855[2mms[22m[39m
-@gym/db:test:  [32m✓[39m test/transaction.test.ts [2m([22m[2m2 tests[22m[2m)[22m[32m 94[2mms[22m[39m
-@gym/api:test:  [32m✓[39m test/auth.test.ts [2m([22m[2m7 tests[22m[2m)[22m[33m 2637[2mms[22m[39m
-@gym/api:test:    [32m✓[39m Auth & Session System [2m(7)[22m
-@gym/api:test:      [33m[2m✓[22m[39m 2. enforces database-backed per-account login throttling after 5 failed attempts[33m 602[2mms[22m[39m
-@gym/api:test:      [33m[2m✓[22m[39m 6. owner-initiated staff password reset (owner only, cannot reset another owner)[33m 606[2mms[22m[39m
+@gym/db:test:  [32mΓ£ô[39m test/comprehensive_security.test.ts [2m([22m[2m12 tests[22m[2m)[22m[33m 446[2mms[22m[39m
+@gym/api:test:  [32mΓ£ô[39m test/jwt.test.ts [2m([22m[2m5 tests[22m[2m)[22m[32m 33[2mms[22m[39m
+@gym/db:test:  [32mΓ£ô[39m test/drift.test.ts [2m([22m[2m2 tests[22m[2m)[22m[32m 133[2mms[22m[39m
+@gym/api:test:  [32mΓ£ô[39m test/app.test.ts [2m([22m[2m2 tests[22m[2m)[22m[33m 581[2mms[22m[39m
+@gym/api:test:    [32mΓ£ô[39m Fastify API Test Harness & DB Startup Assertion [2m(2)[22m
+@gym/api:test:      [33m[2mΓ£ô[22m[39m responds with status ok on /health[33m 518[2mms[22m[39m
+@gym/api:test:  [32mΓ£ô[39m test/route_registry.test.ts [2m([22m[2m5 tests[22m[2m)[22m[33m 1178[2mms[22m[39m
+@gym/api:test:  [32mΓ£ô[39m test/cross_tenant.test.ts [2m([22m[2m7 tests[22m[2m)[22m[33m 1460[2mms[22m[39m
+@gym/api:test:  [32mΓ£ô[39m test/members.test.ts [2m([22m[2m5 tests[22m[2m)[22m[33m 1504[2mms[22m[39m
+@gym/api:test:  [32mΓ£ô[39m test/auth.test.ts [2m([22m[2m7 tests[22m[2m)[22m[33m 1924[2mms[22m[39m
+@gym/api:test:    [32mΓ£ô[39m Auth & Session System [2m(7)[22m
+@gym/api:test:      [33m[2mΓ£ô[22m[39m 2. enforces database-backed per-account login throttling after 5 failed attempts[33m 525[2mms[22m[39m
+@gym/api:test:      [33m[2mΓ£ô[22m[39m 6. owner-initiated staff password reset (owner only, cannot reset another owner)[33m 423[2mms[22m[39m
 @gym/api:test: 
-@gym/api:test: [2m Test Files [22m [1m[32m5 passed[39m[22m[90m (5)[39m
-@gym/api:test: [2m      Tests [22m [1m[32m26 passed[39m[22m[90m (26)[39m
-@gym/api:test: [2m   Start at [22m 16:55:28
-@gym/api:test: [2m   Duration [22m 5.70s[2m (import 56%, tests 40%, transform 3%, worker 1%)[22m
+@gym/api:test: [2m Test Files [22m [1m[32m6 passed[39m[22m[90m (6)[39m
+@gym/api:test: [2m      Tests [22m [1m[32m31 passed[39m[22m[90m (31)[39m
+@gym/api:test: [2m   Start at [22m 19:27:24
+@gym/api:test: [2m   Duration [22m 4.95s[2m (import 58%, tests 34%, transform 8%)[22m
 @gym/api:test: 
-@gym/db:test:  [32m✓[39m test/catalog.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 79[2mms[22m[39m
+@gym/db:test:  [32mΓ£ô[39m test/catalog.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 70[2mms[22m[39m
+@gym/db:test:  [32mΓ£ô[39m test/transaction.test.ts [2m([22m[2m2 tests[22m[2m)[22m[32m 75[2mms[22m[39m
 @gym/db:test: 
 @gym/db:test: [2m Test Files [22m [1m[32m5 passed[39m[22m[90m (5)[39m
 @gym/db:test: [2m      Tests [22m [1m[32m21 passed[39m[22m[90m (21)[39m
-@gym/db:test: [2m   Start at [22m 16:55:22
-@gym/db:test: [2m   Duration [22m 12.69s[2m (import 55%, tests 43%, transform 1%, worker 1%)[22m
+@gym/db:test: [2m   Start at [22m 19:27:20
+@gym/db:test: [2m   Duration [22m 10.34s[2m (import 61%, tests 34%, transform 4%, worker 1%)[22m
 @gym/db:test: 
-@gym/db:test: [2m    Isolate [22m [33m5 workers spawned[39m[2m · ~475ms startup each (spawn + environment, per file)[22m
-@gym/db:test: [2m            [22m [2mat least ~1.90s faster with [22m[33misolate: false[39m[2m — reuses workers across files instead of one per file[22m
+@gym/db:test: [2m    Isolate [22m [33m5 workers spawned[39m[2m ┬╖ ~392ms startup each (spawn + environment, per file)[22m
+@gym/db:test: [2m            [22m [2mat least ~1.57s faster with [22m[33misolate: false[39m[2m ΓÇö reuses workers across files instead of one per file[22m
 @gym/db:test: 
 
  Tasks:    6 successful, 6 total
 Cached:    0 cached, 6 total
-  Time:    14.639s 
+  Time:    13.017s 
 

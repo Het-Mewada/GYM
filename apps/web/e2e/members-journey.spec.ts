@@ -2,6 +2,14 @@ import { test, expect } from '@playwright/test';
 
 test.describe('Members Directory Journey (Slice 1)', () => {
   test('navigates to members directory, searches members, creates single-name member, and filters by status', async ({ page }) => {
+    // Track any unauthorized network requests
+    const unauthorizedRequests: string[] = [];
+    page.on('response', (response) => {
+      if (response.status() === 401) {
+        unauthorizedRequests.push(response.url());
+      }
+    });
+
     // 1. Visit Home Page and navigate to Members Directory
     await page.goto('/');
     await expect(page.locator('h1')).toContainText('Gym Management SaaS');
@@ -10,9 +18,12 @@ test.describe('Members Directory Journey (Slice 1)', () => {
     await expect(directoryLink).toBeVisible();
     await directoryLink.click();
 
-    // 2. Verify Members Page loaded
+    // 2. Verify Members Page loaded in preview mode without unauthenticated 401 errors
     await expect(page).toHaveURL(/\/members/);
     await expect(page.locator('h1')).toContainText('Members Directory');
+    await expect(page.locator('[data-testid="preview-mode-banner"]')).toBeVisible();
+    expect(unauthorizedRequests).toHaveLength(0);
+
     const table = page.locator('[data-testid="members-table"]');
     await expect(table).toBeVisible();
 
@@ -78,5 +89,8 @@ test.describe('Members Directory Journey (Slice 1)', () => {
     // Only inactive members should be shown
     await expect(table).toContainText('Ramesh Patel');
     await expect(table).not.toContainText('Suresh');
+
+    // Confirm that throughout the entire preview workflow zero 401 errors were triggered
+    expect(unauthorizedRequests).toHaveLength(0);
   });
 });
