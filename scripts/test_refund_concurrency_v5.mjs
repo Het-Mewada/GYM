@@ -2,8 +2,21 @@ import pg from 'pg';
 
 const { Pool } = pg;
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || 'postgres://postgres:postgres_dev_password@localhost:5439/gym_saas_dev',
+  connectionString: process.env.DATABASE_URL || 'postgres://app_user:dev_app_password_only@localhost:5439/gym_saas_dev',
   max: 10
+});
+
+// Admin pool exclusively for DDL trigger swap (control vs guarded)
+const adminConnectionString =
+  process.env.ADMIN_DATABASE_URL ||
+  (process.env.DATABASE_URL
+    ? process.env.DATABASE_URL.replace(/:\/\/app_user:[^@]+@/, '://postgres:postgres_ci_password@')
+    : null) ||
+  'postgres://postgres:postgres_dev_password@localhost:5439/gym_saas_dev';
+
+const adminPool = new Pool({
+  connectionString: adminConnectionString,
+  max: 2
 });
 
 async function runTest() {
@@ -63,7 +76,7 @@ async function runTest() {
   console.log('======================================================================');
 
   // Replace trigger function with UNLOCKED version (keeps all validation, removes ONLY lock)
-  const adminClient = await pool.connect();
+  const adminClient = await adminPool.connect();
   await adminClient.query(`
     CREATE OR REPLACE FUNCTION validate_refund_limit()
     RETURNS TRIGGER AS $$
@@ -139,7 +152,7 @@ async function runTest() {
   console.log(`- ${ctrl1.name}: ${ctrl1.success ? 'SUCCESS (Refunded 3000 cents)' : 'FAILED: ' + ctrl1.error}`);
   console.log(`- ${ctrl2.name}: ${ctrl2.success ? 'SUCCESS (Refunded 3000 cents)' : 'FAILED: ' + ctrl2.error}`);
 
-  const checkCtrl = await pool.query(`
+  const checkCtrl = await adminPool.query(`
     SELECT SUM(ABS(amount_cents)) as total_refunded FROM payment_transactions
     WHERE gym_id = $1 AND parent_transaction_id = $2 AND type = 'refund';
   `, [gymId, payId]);
@@ -157,7 +170,7 @@ async function runTest() {
   console.log('======================================================================');
 
   // Restore trigger function WITH pg_advisory_xact_lock
-  const adminClient2 = await pool.connect();
+  const adminClient2 = await adminPool.connect();
   await adminClient2.query(`
     CREATE OR REPLACE FUNCTION validate_refund_limit()
     RETURNS TRIGGER AS $$
@@ -235,7 +248,7 @@ async function runTest() {
   console.log(`- ${guard1.name}: ${guard1.success ? 'SUCCESS (Refunded 3000 cents)' : 'FAILED: ' + guard1.error}`);
   console.log(`- ${guard2.name}: ${guard2.success ? 'SUCCESS (Refunded 3000 cents)' : 'FAILED: ' + guard2.error}`);
 
-  const checkGuard = await pool.query(`
+  const checkGuard = await adminPool.query(`
     SELECT SUM(ABS(amount_cents)) as total_refunded FROM payment_transactions
     WHERE gym_id = $1 AND parent_transaction_id = $2 AND type = 'refund';
   `, [gymId, payId2]);
@@ -248,6 +261,7 @@ async function runTest() {
     process.exit(1);
   }
 
+  await adminPool.end();
   await pool.end();
 }
 

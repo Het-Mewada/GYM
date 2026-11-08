@@ -2,8 +2,21 @@ import pg from 'pg';
 
 const { Pool } = pg;
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || 'postgres://postgres:postgres_dev_password@localhost:5439/gym_saas_dev',
+  connectionString: process.env.DATABASE_URL || 'postgres://app_user:dev_app_password_only@localhost:5439/gym_saas_dev',
   max: 10
+});
+
+// Admin pool exclusively for DDL trigger swap (control vs guarded)
+const adminConnectionString =
+  process.env.ADMIN_DATABASE_URL ||
+  (process.env.DATABASE_URL
+    ? process.env.DATABASE_URL.replace(/:\/\/app_user:[^@]+@/, '://postgres:postgres_ci_password@')
+    : null) ||
+  'postgres://postgres:postgres_dev_password@localhost:5439/gym_saas_dev';
+
+const adminPool = new Pool({
+  connectionString: adminConnectionString,
+  max: 2
 });
 
 async function runTest() {
@@ -49,7 +62,7 @@ async function runTest() {
   console.log('======================================================================');
 
   // Replace trigger function with UNLOCKED version (keeps overlap query, removes ONLY advisory lock)
-  const adminClient = await pool.connect();
+  const adminClient = await adminPool.connect();
   await adminClient.query(`
     CREATE OR REPLACE FUNCTION validate_subscription_overlap()
     RETURNS TRIGGER AS $$
@@ -117,7 +130,7 @@ async function runTest() {
   console.log(`- ${ctrl1.name}: ${ctrl1.success ? 'SUCCESS (Inserted sub ' + ctrl1.id + ')' : 'FAILED: ' + ctrl1.error}`);
   console.log(`- ${ctrl2.name}: ${ctrl2.success ? 'SUCCESS (Inserted sub ' + ctrl2.id + ')' : 'FAILED: ' + ctrl2.error}`);
 
-  const checkCtrl = await pool.query(`
+  const checkCtrl = await adminPool.query(`
     SELECT count(*) as total_active FROM subscriptions
     WHERE gym_id = $1 AND member_id = $2 AND status = 'active';
   `, [gymId, member1Id]);
@@ -135,7 +148,7 @@ async function runTest() {
   console.log('======================================================================');
 
   // Restore trigger function WITH pg_advisory_xact_lock
-  const adminClient2 = await pool.connect();
+  const adminClient2 = await adminPool.connect();
   await adminClient2.query(`
     CREATE OR REPLACE FUNCTION validate_subscription_overlap()
     RETURNS TRIGGER AS $$
@@ -190,7 +203,7 @@ async function runTest() {
   console.log(`- ${guard1.name}: ${guard1.success ? 'SUCCESS (Inserted sub ' + guard1.id + ')' : 'FAILED: ' + guard1.error}`);
   console.log(`- ${guard2.name}: ${guard2.success ? 'SUCCESS (Inserted sub ' + guard2.id + ')' : 'FAILED: ' + guard2.error}`);
 
-  const checkGuard = await pool.query(`
+  const checkGuard = await adminPool.query(`
     SELECT count(*) as total_active FROM subscriptions
     WHERE gym_id = $1 AND member_id = $2 AND status = 'active';
   `, [gymId, member2Id]);
@@ -203,6 +216,7 @@ async function runTest() {
     process.exit(1);
   }
 
+  await adminPool.end();
   await pool.end();
 }
 
