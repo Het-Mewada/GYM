@@ -1,6 +1,6 @@
 import type { FastifyPluginAsync } from 'fastify';
 import type pg from 'pg';
-import { withTenantContext, members, eq, and, or, ilike, isNull, desc, sql } from '@gym/db';
+import { withTenantContext, members, membershipPlans, subscriptions, eq, and, or, ilike, isNull, desc, sql } from '@gym/db';
 import { authenticateUser, createRequireTenantMembership } from '../middleware/auth.js';
 import { generateRandomToken, hashToken, hashPassword } from '../auth/crypto.js';
 
@@ -64,10 +64,19 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
         }
 
         const normalizedPhone = adminPhone.trim();
-        const existingRes = await client.query<{ out_user_id: string; out_full_name: string }>(
-          'SELECT out_user_id, out_full_name FROM auth_lookup_user_by_phone($1);',
+        let existingRes = await client.query<{ out_user_id: string; out_full_name: string }>(
+          'SELECT out_user_id, out_full_name FROM auth_lookup_user_by_identifier($1);',
           [normalizedPhone]
         );
+
+        if (existingRes.rows.length === 0 && adminEmail && adminEmail.trim()) {
+          existingRes = await client.query<{ out_user_id: string; out_full_name: string }>(
+            'SELECT out_user_id, out_full_name FROM auth_lookup_user_by_identifier($1);',
+            [adminEmail.trim()]
+          );
+        }
+
+        const passHash = await hashPassword(adminPassword);
 
         if (existingRes.rows.length > 0) {
           targetOwnerId = existingRes.rows[0].out_user_id;
@@ -78,7 +87,6 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
             email: adminEmail?.trim() || null
           };
         } else {
-          const passHash = await hashPassword(adminPassword);
           const regRes = await client.query<{ auth_register_user: string }>(
             'SELECT auth_register_user($1, $2, $3, $4) as auth_register_user;',
             [normalizedPhone, passHash, adminFullName.trim(), adminEmail?.trim() || null]
@@ -93,9 +101,11 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
         }
       }
 
+      const gymPasswordHash = (createdAdminUser && adminPassword) ? await hashPassword(adminPassword) : null;
+
       const res = await client.query<{ provision_gym: string }>(
-        'SELECT provision_gym($1, $2, $3, $4, $5, $6, $7) as provision_gym;',
-        [targetOwnerId, name.trim(), slug.trim().toLowerCase(), country, timezone, currency, taxRateBasisPoints]
+        'SELECT provision_gym($1, $2, $3, $4, $5, $6, $7, $8) as provision_gym;',
+        [targetOwnerId, name.trim(), slug.trim().toLowerCase(), country, timezone, currency, taxRateBasisPoints, gymPasswordHash]
       );
 
       const gymId = res.rows[0].provision_gym;
@@ -613,5 +623,479 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
       fastify.log.error(err);
       return reply.status(500).send({ error: 'Failed to initiate staff password reset' });
     }
+  });
+
+  // 6. List Membership Plans for Gym
+  fastify.get<{
+    Params: { gymId: string };
+    Querystring: { active?: string };
+  }>('/:gymId/plans', {
+    preHandler: [authenticateUser, requireTenant]
+  }, async (req, reply) => {
+    const { gymId } = req.params;
+    const { active } = req.query;
+    const tenantContext = req.tenantContext!;
+
+    const result = await withTenantContext(pool, tenantContext, async (tx) => {
+      const conditions = [eq(membershipPlans.gymId, gymId)];
+      if (active === 'true') {
+        conditions.push(eq(membershipPlans.isActive, true));
+      } else if (active === 'false') {
+        conditions.push(eq(membershipPlans.isActive, false));
+      }
+
+      return tx
+        .select()
+        .from(membershipPlans)
+        .where(and(...conditions))
+        .orderBy(desc(membershipPlans.createdAt));
+    });
+
+    return reply.send({ plans: result });
+  });
+
+  // 7. Create Membership Plan (Owner or Manager only)
+  fastify.post<{
+    Params: { gymId: string };
+    Body: {
+      name: string;
+      durationDays: number;
+      priceCents: number;
+      gymId?: string;
+      gym_id?: string;
+    };
+  }>('/:gymId/plans', {
+    preHandler: [authenticateUser, requireTenant]
+  }, async (req, reply) => {
+    const { gymId } = req.params;
+    const tenantContext = req.tenantContext!;
+
+    // Cross-tenant payload protection
+    const bodyGymId = req.body.gym_id || req.body.gymId;
+    if (bodyGymId && bodyGymId !== gymId) {
+      return reply.status(403).send({ error: 'Cross-tenant violation: body gymId does not match route gymId' });
+    }
+
+    // Role check: only owner or manager can create plans
+    if (tenantContext.role !== 'owner' && tenantContext.role !== 'manager') {
+      return reply.status(403).send({ error: 'Forbidden: Only owners and managers can create membership plans' });
+    }
+
+    const { name, durationDays, priceCents } = req.body;
+    if (!name || !name.trim()) {
+      return reply.status(400).send({ error: 'Plan name is required' });
+    }
+    if (typeof durationDays !== 'number' || durationDays <= 0 || !Number.isInteger(durationDays)) {
+      return reply.status(400).send({ error: 'Duration in days must be a positive integer' });
+    }
+    if (typeof priceCents !== 'number' || priceCents < 0 || !Number.isInteger(priceCents)) {
+      return reply.status(400).send({ error: 'Price must be a non-negative integer in cents' });
+    }
+
+    const result = await withTenantContext(pool, tenantContext, async (tx) => {
+      const [newPlan] = await tx
+        .insert(membershipPlans)
+        .values({
+          gymId,
+          name: name.trim(),
+          durationDays,
+          priceCents: BigInt(priceCents),
+          isActive: true
+        })
+        .returning();
+      return newPlan;
+    });
+
+    return reply.status(201).send({ plan: result });
+  });
+
+  // 8. Get Single Membership Plan
+  fastify.get<{
+    Params: { gymId: string; planId: string };
+  }>('/:gymId/plans/:planId', {
+    preHandler: [authenticateUser, requireTenant]
+  }, async (req, reply) => {
+    const { gymId, planId } = req.params;
+    const tenantContext = req.tenantContext!;
+
+    const plan = await withTenantContext(pool, tenantContext, async (tx) => {
+      const rows = await tx
+        .select()
+        .from(membershipPlans)
+        .where(and(eq(membershipPlans.gymId, gymId), eq(membershipPlans.id, planId)))
+        .limit(1);
+      return rows[0] || null;
+    });
+
+    if (!plan) {
+      return reply.status(404).send({ error: 'Membership plan not found in this gym' });
+    }
+
+    return reply.send({ plan });
+  });
+
+  // 9. Update Membership Plan (Owner or Manager only)
+  fastify.patch<{
+    Params: { gymId: string; planId: string };
+    Body: {
+      name?: string;
+      durationDays?: number;
+      priceCents?: number;
+      isActive?: boolean;
+      gymId?: string;
+      gym_id?: string;
+    };
+  }>('/:gymId/plans/:planId', {
+    preHandler: [authenticateUser, requireTenant]
+  }, async (req, reply) => {
+    const { gymId, planId } = req.params;
+    const tenantContext = req.tenantContext!;
+
+    // Cross-tenant payload protection
+    const bodyGymId = req.body.gym_id || req.body.gymId;
+    if (bodyGymId && bodyGymId !== gymId) {
+      return reply.status(403).send({ error: 'Cross-tenant violation: body gymId does not match route gymId' });
+    }
+
+    // Role check: only owner or manager can update plans
+    if (tenantContext.role !== 'owner' && tenantContext.role !== 'manager') {
+      return reply.status(403).send({ error: 'Forbidden: Only owners and managers can update membership plans' });
+    }
+
+    const { name, durationDays, priceCents, isActive } = req.body;
+    const updates: Partial<{
+      name: string;
+      durationDays: number;
+      priceCents: bigint;
+      isActive: boolean;
+    }> = {};
+
+    if (name !== undefined) {
+      if (!name.trim()) return reply.status(400).send({ error: 'Plan name cannot be empty' });
+      updates.name = name.trim();
+    }
+    if (durationDays !== undefined) {
+      if (typeof durationDays !== 'number' || durationDays <= 0 || !Number.isInteger(durationDays)) {
+        return reply.status(400).send({ error: 'Duration in days must be a positive integer' });
+      }
+      updates.durationDays = durationDays;
+    }
+    if (priceCents !== undefined) {
+      if (typeof priceCents !== 'number' || priceCents < 0 || !Number.isInteger(priceCents)) {
+        return reply.status(400).send({ error: 'Price must be a non-negative integer in cents' });
+      }
+      updates.priceCents = BigInt(priceCents);
+    }
+    if (isActive !== undefined) {
+      updates.isActive = Boolean(isActive);
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return reply.status(400).send({ error: 'No valid fields provided for update' });
+    }
+
+    const updatedPlan = await withTenantContext(pool, tenantContext, async (tx) => {
+      const [updated] = await tx
+        .update(membershipPlans)
+        .set(updates)
+        .where(and(eq(membershipPlans.gymId, gymId), eq(membershipPlans.id, planId)))
+        .returning();
+      return updated || null;
+    });
+
+    if (!updatedPlan) {
+      return reply.status(404).send({ error: 'Membership plan not found in this gym' });
+    }
+
+    return reply.send({ plan: updatedPlan });
+  });
+
+  // 10. List Member Subscriptions
+  fastify.get<{
+    Params: { gymId: string; memberId: string };
+  }>('/:gymId/members/:memberId/subscriptions', {
+    preHandler: [authenticateUser, requireTenant]
+  }, async (req, reply) => {
+    const { gymId, memberId } = req.params;
+    const tenantContext = req.tenantContext!;
+
+    const result = await withTenantContext(pool, tenantContext, async (tx) => {
+      // First verify member exists in this gym
+      const memberRows = await tx
+        .select({ id: members.id })
+        .from(members)
+        .where(and(eq(members.gymId, gymId), eq(members.id, memberId)))
+        .limit(1);
+
+      if (memberRows.length === 0) {
+        return null;
+      }
+
+      const rows = await tx
+        .select({
+          id: subscriptions.id,
+          gymId: subscriptions.gymId,
+          memberId: subscriptions.memberId,
+          planId: subscriptions.planId,
+          status: subscriptions.status,
+          startDate: subscriptions.startDate,
+          endDate: subscriptions.endDate,
+          totalPriceCents: subscriptions.totalPriceCents,
+          discountCents: subscriptions.discountCents,
+          createdAt: subscriptions.createdAt,
+          planName: membershipPlans.name,
+          planDurationDays: membershipPlans.durationDays
+        })
+        .from(subscriptions)
+        .innerJoin(membershipPlans, and(
+          eq(membershipPlans.gymId, subscriptions.gymId),
+          eq(membershipPlans.id, subscriptions.planId)
+        ))
+        .where(and(eq(subscriptions.gymId, gymId), eq(subscriptions.memberId, memberId)))
+        .orderBy(desc(subscriptions.startDate));
+
+      return rows;
+    });
+
+    if (result === null) {
+      return reply.status(404).send({ error: 'Member not found in this gym' });
+    }
+
+    return reply.send({ subscriptions: result });
+  });
+
+  // 11. Create Subscription for Member
+  fastify.post<{
+    Params: { gymId: string; memberId: string };
+    Body: {
+      planId: string;
+      startDate?: string;
+      discountCents?: number;
+      gymId?: string;
+      gym_id?: string;
+    };
+  }>('/:gymId/members/:memberId/subscriptions', {
+    preHandler: [authenticateUser, requireTenant]
+  }, async (req, reply) => {
+    const { gymId, memberId } = req.params;
+    const tenantContext = req.tenantContext!;
+
+    // Cross-tenant payload protection
+    const bodyGymId = req.body.gym_id || req.body.gymId;
+    if (bodyGymId && bodyGymId !== gymId) {
+      return reply.status(403).send({ error: 'Cross-tenant violation: body gymId does not match route gymId' });
+    }
+
+    const { planId, startDate, discountCents = 0 } = req.body;
+    if (!planId) {
+      return reply.status(400).send({ error: 'planId is required' });
+    }
+    if (typeof discountCents !== 'number' || discountCents < 0 || !Number.isInteger(discountCents)) {
+      return reply.status(400).send({ error: 'discountCents must be a non-negative integer' });
+    }
+
+    try {
+      const newSub = await withTenantContext(pool, tenantContext, async (tx) => {
+        // 1. Verify member exists in this gym
+        const memberRows = await tx
+          .select({ id: members.id, firstName: members.firstName, lastName: members.lastName })
+          .from(members)
+          .where(and(eq(members.gymId, gymId), eq(members.id, memberId)))
+          .limit(1);
+
+        if (memberRows.length === 0) {
+          const err = new Error('Member not found in this gym');
+          (err as Error & { statusCode: number }).statusCode = 404;
+          throw err;
+        }
+
+        // 2. Verify plan exists in this gym and is active
+        const planRows = await tx
+          .select()
+          .from(membershipPlans)
+          .where(and(eq(membershipPlans.gymId, gymId), eq(membershipPlans.id, planId)))
+          .limit(1);
+
+        if (planRows.length === 0) {
+          const err = new Error('Membership plan not found in this gym');
+          (err as Error & { statusCode: number }).statusCode = 404;
+          throw err;
+        }
+
+        const plan = planRows[0];
+        if (!plan.isActive) {
+          const err = new Error('Cannot subscribe to an inactive membership plan');
+          (err as Error & { statusCode: number }).statusCode = 400;
+          throw err;
+        }
+
+        const planPriceNum = Number(plan.priceCents);
+        if (discountCents > planPriceNum) {
+          const err = new Error(`Discount (${discountCents}) cannot exceed plan price (${planPriceNum})`);
+          (err as Error & { statusCode: number }).statusCode = 400;
+          throw err;
+        }
+
+        // 3. Determine start date
+        let resolvedStartDate: string;
+        if (startDate) {
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
+            const err = new Error('startDate must be formatted as YYYY-MM-DD');
+            (err as Error & { statusCode: number }).statusCode = 400;
+            throw err;
+          }
+          resolvedStartDate = startDate;
+        } else {
+          // Default start date: if there is an active/queued subscription, start the day after its end date
+          const latestSubRes = await tx
+            .select({ endDate: subscriptions.endDate })
+            .from(subscriptions)
+            .where(and(
+              eq(subscriptions.gymId, gymId),
+              eq(subscriptions.memberId, memberId),
+              sql`${subscriptions.status} IN ('active', 'queued')`
+            ))
+            .orderBy(desc(subscriptions.endDate))
+            .limit(1);
+
+          if (latestSubRes.length > 0) {
+            const nextDayDate = new Date(latestSubRes[0].endDate);
+            nextDayDate.setUTCDate(nextDayDate.getUTCDate() + 1);
+            resolvedStartDate = nextDayDate.toISOString().split('T')[0];
+          } else {
+            resolvedStartDate = new Date().toISOString().split('T')[0];
+          }
+        }
+
+        // Compute end_date = resolvedStartDate + (duration_days - 1) days
+        const startD = new Date(resolvedStartDate);
+        const endD = new Date(startD);
+        endD.setUTCDate(endD.getUTCDate() + (plan.durationDays - 1));
+        const resolvedEndDate = endD.toISOString().split('T')[0];
+
+        // Determine initial status:
+        // If start_date <= today: 'active'
+        // If start_date > today: 'queued'
+        const todayStr = new Date().toISOString().split('T')[0];
+        const initialStatus = resolvedStartDate <= todayStr ? 'active' : 'queued';
+
+        // 4. Insert subscription (trigger trg_subscriptions_overlap validates non-overlap atomically)
+        const [insertedSub] = await tx
+          .insert(subscriptions)
+          .values({
+            gymId,
+            memberId,
+            planId,
+            status: initialStatus,
+            startDate: resolvedStartDate,
+            endDate: resolvedEndDate,
+            totalPriceCents: plan.priceCents,
+            discountCents: BigInt(discountCents)
+          })
+          .returning();
+
+        return insertedSub;
+      });
+
+      return reply.status(201).send({ subscription: newSub });
+    } catch (err: unknown) {
+      const dbErr = (err && typeof err === 'object' && 'cause' in err && err.cause ? err.cause : err) as {
+        code?: string;
+        constraint?: string;
+        message?: string;
+        statusCode?: number;
+      };
+      if (dbErr.statusCode) {
+        return reply.status(dbErr.statusCode).send({ error: dbErr.message });
+      }
+      const msg = dbErr.message || (err instanceof Error ? err.message : String(err));
+      if (msg.includes('overlap') || msg.includes('trg_subscriptions_overlap')) {
+        return reply.status(409).send({ error: 'Subscription dates overlap with an existing active or queued subscription' });
+      }
+      fastify.log.error(err);
+      return reply.status(500).send({ error: 'Failed to create subscription' });
+    }
+  });
+
+  // 12. Get Single Subscription
+  fastify.get<{
+    Params: { gymId: string; subscriptionId: string };
+  }>('/:gymId/subscriptions/:subscriptionId', {
+    preHandler: [authenticateUser, requireTenant]
+  }, async (req, reply) => {
+    const { gymId, subscriptionId } = req.params;
+    const tenantContext = req.tenantContext!;
+
+    const sub = await withTenantContext(pool, tenantContext, async (tx) => {
+      const rows = await tx
+        .select({
+          id: subscriptions.id,
+          gymId: subscriptions.gymId,
+          memberId: subscriptions.memberId,
+          planId: subscriptions.planId,
+          status: subscriptions.status,
+          startDate: subscriptions.startDate,
+          endDate: subscriptions.endDate,
+          totalPriceCents: subscriptions.totalPriceCents,
+          discountCents: subscriptions.discountCents,
+          createdAt: subscriptions.createdAt,
+          memberFirstName: members.firstName,
+          memberLastName: members.lastName,
+          memberNumber: members.memberNumber,
+          memberPhone: members.phone,
+          planName: membershipPlans.name,
+          planDurationDays: membershipPlans.durationDays
+        })
+        .from(subscriptions)
+        .innerJoin(members, and(eq(members.gymId, subscriptions.gymId), eq(members.id, subscriptions.memberId)))
+        .innerJoin(membershipPlans, and(eq(membershipPlans.gymId, subscriptions.gymId), eq(membershipPlans.id, subscriptions.planId)))
+        .where(and(eq(subscriptions.gymId, gymId), eq(subscriptions.id, subscriptionId)))
+        .limit(1);
+
+      return rows[0] || null;
+    });
+
+    if (!sub) {
+      return reply.status(404).send({ error: 'Subscription not found in this gym' });
+    }
+
+    return reply.send({ subscription: sub });
+  });
+
+  // 13. Cancel Subscription (Owner or Manager only)
+  fastify.post<{
+    Params: { gymId: string; subscriptionId: string };
+    Body?: { gymId?: string; gym_id?: string };
+  }>('/:gymId/subscriptions/:subscriptionId/cancel', {
+    preHandler: [authenticateUser, requireTenant]
+  }, async (req, reply) => {
+    const { gymId, subscriptionId } = req.params;
+    const tenantContext = req.tenantContext!;
+
+    // Cross-tenant payload protection
+    const bodyGymId = req.body?.gym_id || req.body?.gymId;
+    if (bodyGymId && bodyGymId !== gymId) {
+      return reply.status(403).send({ error: 'Cross-tenant violation: body gymId does not match route gymId' });
+    }
+
+    // Role check: only owner or manager can cancel subscriptions
+    if (tenantContext.role !== 'owner' && tenantContext.role !== 'manager') {
+      return reply.status(403).send({ error: 'Forbidden: Only owners and managers can cancel subscriptions' });
+    }
+
+    const cancelledSub = await withTenantContext(pool, tenantContext, async (tx) => {
+      const [updated] = await tx
+        .update(subscriptions)
+        .set({ status: 'cancelled' })
+        .where(and(eq(subscriptions.gymId, gymId), eq(subscriptions.id, subscriptionId)))
+        .returning();
+      return updated || null;
+    });
+
+    if (!cancelledSub) {
+      return reply.status(404).send({ error: 'Subscription not found in this gym' });
+    }
+
+    return reply.send({ subscription: cancelledSub });
   });
 };

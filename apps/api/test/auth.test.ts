@@ -439,4 +439,99 @@ describe('Auth & Session System', () => {
     expect(membersList[0].firstName).toBe('Elite');
     expect(membersList[0].memberNumber).toBe('MEM-00001');
   });
+
+  it('9. supports multi-tenant user login and distinct per-gym passwords for the same user/email', async () => {
+    // Log in as Super Admin to obtain platform admin token
+    const superLogin = await app.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      payload: { phone: '+919999900000', password: 'Password123!' }
+    });
+    expect(superLogin.statusCode).toBe(200);
+    const superToken = superLogin.json().accessToken;
+
+    const multiEmail = `multi-${Date.now()}@fitnesschain.com`;
+    const multiPhone = `+91971${Math.floor(1000000 + Math.random() * 9000000)}`;
+    const passGymA = 'PassGymA123!';
+    const passGymB = 'PassGymB456!';
+
+    // Provision Gym 1 with Password A
+    const gym1Res = await app.inject({
+      method: 'POST',
+      url: '/api/gyms',
+      headers: { authorization: `Bearer ${superToken}` },
+      payload: {
+        name: 'Gym One Central',
+        slug: `gym1-${Date.now()}`,
+        adminPhone: multiPhone,
+        adminFullName: 'Multi Tenant Owner',
+        adminPassword: passGymA,
+        adminEmail: multiEmail
+      }
+    });
+    expect(gym1Res.statusCode).toBe(201);
+    const gym1Id = gym1Res.json().gymId;
+
+    // Provision Gym 2 with Password B (same user/email, different password)
+    const gym2Res = await app.inject({
+      method: 'POST',
+      url: '/api/gyms',
+      headers: { authorization: `Bearer ${superToken}` },
+      payload: {
+        name: 'Gym Two Downtown',
+        slug: `gym2-${Date.now()}`,
+        adminPhone: multiPhone,
+        adminFullName: 'Multi Tenant Owner',
+        adminPassword: passGymB,
+        adminEmail: multiEmail
+      }
+    });
+    expect(gym2Res.statusCode).toBe(201);
+    const gym2Id = gym2Res.json().gymId;
+
+    // 9a. Log in using email and Password A -> Only Gym 1 is unlocked
+    const loginGym1 = await app.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      payload: { identifier: multiEmail, password: passGymA }
+    });
+    expect(loginGym1.statusCode).toBe(200);
+    const loginGym1Body = loginGym1.json();
+    expect(loginGym1Body.memberships).toHaveLength(1);
+    expect(loginGym1Body.memberships[0].gym_id).toBe(gym1Id);
+    expect(loginGym1Body.memberships[0].gym_name).toBe('Gym One Central');
+
+    // 9b. Log in using email and Password B -> Only Gym 2 is unlocked
+    const loginGym2 = await app.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      payload: { identifier: multiEmail, password: passGymB }
+    });
+    expect(loginGym2.statusCode).toBe(200);
+    const loginGym2Body = loginGym2.json();
+    expect(loginGym2Body.memberships).toHaveLength(1);
+    expect(loginGym2Body.memberships[0].gym_id).toBe(gym2Id);
+    expect(loginGym2Body.memberships[0].gym_name).toBe('Gym Two Downtown');
+
+    // 9c. Switch from Gym 1 session to Gym 2: requires Password B
+    const sessionToken = loginGym1Body.accessToken;
+    const failedSwitch = await app.inject({
+      method: 'POST',
+      url: '/api/auth/switch-gym',
+      headers: { authorization: `Bearer ${sessionToken}` },
+      payload: { gymId: gym2Id, password: 'WrongPassword!' }
+    });
+    expect(failedSwitch.statusCode).toBe(401);
+    expect(failedSwitch.json().error).toContain('Incorrect password');
+
+    const successfulSwitch = await app.inject({
+      method: 'POST',
+      url: '/api/auth/switch-gym',
+      headers: { authorization: `Bearer ${sessionToken}` },
+      payload: { gymId: gym2Id, password: passGymB }
+    });
+    expect(successfulSwitch.statusCode).toBe(200);
+    expect(successfulSwitch.json().success).toBe(true);
+    expect(successfulSwitch.json().gym.id).toBe(gym2Id);
+  });
 });

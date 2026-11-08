@@ -205,8 +205,8 @@ export default function PlatformTenantsPage() {
   }
 
   return (
-    <div className="min-h-screen bg-neutral-950 text-neutral-100 p-6 md:p-10">
-      <div className="max-w-6xl mx-auto space-y-6">
+    <div className="min-h-screen w-full bg-neutral-950 text-neutral-100 p-6 md:p-8">
+      <div className="w-full space-y-6">
 
         {/* Top Navigation & Status */}
         <header className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-neutral-800 pb-6">
@@ -402,7 +402,7 @@ export default function PlatformTenantsPage() {
       {/* CREATE TENANT MODAL */}
       {isModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm overflow-y-auto">
-          <div className="w-full max-w-xl bg-neutral-900 border border-neutral-800 rounded-2xl p-6 shadow-2xl space-y-5 my-8">
+          <div className="w-full max-w-2xl bg-neutral-900 border border-neutral-800 rounded-2xl p-6 shadow-2xl space-y-5 my-8">
             <div className="flex items-center justify-between border-b border-neutral-800 pb-4">
               <div>
                 <h2 className="text-lg font-bold text-white">Create New Gym Tenant</h2>

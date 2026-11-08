@@ -48,6 +48,7 @@ export const userGymMemberships = pgTable('user_gym_memberships', {
   userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
   role: varchar('role', { length: 20 }).notNull(), // 'owner' | 'staff'
   isActive: boolean('is_active').notNull().default(true),
+  passwordHash: varchar('password_hash', { length: 255 }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
 }, (table) => [
   uniqueIndex('uq_user_gym_memberships_gym_user').on(table.gymId, table.userId)

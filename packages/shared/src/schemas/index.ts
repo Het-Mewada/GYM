@@ -45,3 +45,26 @@ export const PaymentRecordSchema = z.object({
   externalReference: z.string().max(100).optional().nullable(),
   notes: z.string().max(255).optional().nullable()
 });
+
+export const MembershipPlanCreateSchema = z.object({
+  name: z.string().min(1, 'Plan name is required').max(100),
+  durationDays: z.number().int().positive('Duration in days must be greater than 0'),
+  priceCents: z.number().int().min(0, 'Price must be non-negative')
+});
+
+export const MembershipPlanUpdateSchema = z.object({
+  name: z.string().min(1).max(100).optional(),
+  durationDays: z.number().int().positive().optional(),
+  priceCents: z.number().int().min(0).optional(),
+  isActive: z.boolean().optional()
+});
+
+export const SubscriptionCreateSchema = z.object({
+  planId: z.string().uuid('Invalid plan ID'),
+  startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date must be formatted as YYYY-MM-DD').optional(),
+  discountCents: z.number().int().min(0).default(0)
+});
+
+export type MembershipPlanCreateInput = z.infer<typeof MembershipPlanCreateSchema>;
+export type MembershipPlanUpdateInput = z.infer<typeof MembershipPlanUpdateSchema>;
+export type SubscriptionCreateInput = z.infer<typeof SubscriptionCreateSchema>;

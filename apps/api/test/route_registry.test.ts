@@ -29,6 +29,7 @@ const ROUTE_REGISTRY: RouteDeclaration[] = [
   { method: 'POST', url: '/api/auth/invites/claim', isTenantScoped: false, notes: 'Staff invitation claim' },
   { method: 'POST', url: '/api/auth/password-reset/request', isTenantScoped: false, notes: 'Password reset request' },
   { method: 'POST', url: '/api/auth/password-reset/complete', isTenantScoped: false, notes: 'Password reset completion' },
+  { method: 'POST', url: '/api/auth/switch-gym', isTenantScoped: false, notes: 'Tenant session switch with credential re-verification' },
   { method: 'POST', url: '/api/gyms', isTenantScoped: false, notes: 'User-scoped gym provisioning' },
   { method: 'GET', url: '/api/gyms', isTenantScoped: false, notes: 'List gyms (platform admin gets all; users get memberships)' },
 
@@ -83,6 +84,76 @@ const ROUTE_REGISTRY: RouteDeclaration[] = [
     hasBodyIsolationTest: true,
     hasResourceIdIsolationTest: true,
     notes: 'Owner-initiated reset for staff user'
+  },
+  {
+    method: 'GET',
+    url: '/api/gyms/:gymId/plans',
+    isTenantScoped: true,
+    hasPathIsolationTest: true,
+    hasBodyIsolationTest: false,
+    notes: 'List membership plans'
+  },
+  {
+    method: 'POST',
+    url: '/api/gyms/:gymId/plans',
+    isTenantScoped: true,
+    hasPathIsolationTest: true,
+    hasBodyIsolationTest: true,
+    notes: 'Create membership plan'
+  },
+  {
+    method: 'GET',
+    url: '/api/gyms/:gymId/plans/:planId',
+    isTenantScoped: true,
+    hasPathIsolationTest: true,
+    hasBodyIsolationTest: false,
+    hasResourceIdIsolationTest: true,
+    notes: 'Get membership plan'
+  },
+  {
+    method: 'PATCH',
+    url: '/api/gyms/:gymId/plans/:planId',
+    isTenantScoped: true,
+    hasPathIsolationTest: true,
+    hasBodyIsolationTest: true,
+    hasResourceIdIsolationTest: true,
+    notes: 'Update membership plan'
+  },
+  {
+    method: 'GET',
+    url: '/api/gyms/:gymId/members/:memberId/subscriptions',
+    isTenantScoped: true,
+    hasPathIsolationTest: true,
+    hasBodyIsolationTest: false,
+    hasResourceIdIsolationTest: true,
+    notes: 'List member subscriptions'
+  },
+  {
+    method: 'POST',
+    url: '/api/gyms/:gymId/members/:memberId/subscriptions',
+    isTenantScoped: true,
+    hasPathIsolationTest: true,
+    hasBodyIsolationTest: true,
+    hasResourceIdIsolationTest: true,
+    notes: 'Create subscription for member'
+  },
+  {
+    method: 'GET',
+    url: '/api/gyms/:gymId/subscriptions/:subscriptionId',
+    isTenantScoped: true,
+    hasPathIsolationTest: true,
+    hasBodyIsolationTest: false,
+    hasResourceIdIsolationTest: true,
+    notes: 'Get subscription details'
+  },
+  {
+    method: 'POST',
+    url: '/api/gyms/:gymId/subscriptions/:subscriptionId/cancel',
+    isTenantScoped: true,
+    hasPathIsolationTest: true,
+    hasBodyIsolationTest: true,
+    hasResourceIdIsolationTest: true,
+    notes: 'Cancel subscription'
   }
 ];
 
@@ -99,6 +170,10 @@ describe('Route Registry & Cross-Tenant Isolation Enforcement', () => {
   let memberBId: string;
   let staffAId: string;
   let staffBId: string;
+  let planAId: string;
+  let planBId: string;
+  let subAId: string;
+  let subBId: string;
 
   beforeAll(async () => {
     pool = createPool();
@@ -189,6 +264,40 @@ describe('Route Registry & Cross-Tenant Isolation Enforcement', () => {
 
     await linkStaff(gymAId, staffAId);
     await linkStaff(gymBId, staffBId);
+
+    // Create Plans in Gym A and Gym B
+    const planARes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymAId}/plans`,
+      headers: { authorization: `Bearer ${ownerAToken}` },
+      payload: { name: 'Alpha Monthly', durationDays: 30, priceCents: 500000 }
+    });
+    planAId = JSON.parse(planARes.payload).plan.id;
+
+    const planBRes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymBId}/plans`,
+      headers: { authorization: `Bearer ${ownerBToken}` },
+      payload: { name: 'Beta Monthly', durationDays: 30, priceCents: 600000 }
+    });
+    planBId = JSON.parse(planBRes.payload).plan.id;
+
+    // Create Subscriptions in Gym A and Gym B
+    const subARes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymAId}/members/${memberAId}/subscriptions`,
+      headers: { authorization: `Bearer ${ownerAToken}` },
+      payload: { planId: planAId }
+    });
+    subAId = JSON.parse(subARes.payload).subscription.id;
+
+    const subBRes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymBId}/members/${memberBId}/subscriptions`,
+      headers: { authorization: `Bearer ${ownerBToken}` },
+      payload: { planId: planBId }
+    });
+    subBId = JSON.parse(subBRes.payload).subscription.id;
   });
 
   afterAll(async () => {
@@ -272,6 +381,73 @@ describe('Route Registry & Cross-Tenant Isolation Enforcement', () => {
       headers: { authorization: `Bearer ${ownerBToken}` }
     });
     expect(resetRes.statusCode).toBe(403);
+
+    // 6. GET /api/gyms/:gymId/plans
+    const listPlansRes = await app.inject({
+      method: 'GET',
+      url: `/api/gyms/${gymAId}/plans`,
+      headers: { authorization: `Bearer ${ownerBToken}` }
+    });
+    expect(listPlansRes.statusCode).toBe(403);
+
+    // 7. POST /api/gyms/:gymId/plans
+    const createPlanRes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymAId}/plans`,
+      headers: { authorization: `Bearer ${ownerBToken}` },
+      payload: { name: 'Intruder Plan', durationDays: 30, priceCents: 1000 }
+    });
+    expect(createPlanRes.statusCode).toBe(403);
+
+    // 8. GET /api/gyms/:gymId/plans/:planId
+    const getPlanRes = await app.inject({
+      method: 'GET',
+      url: `/api/gyms/${gymAId}/plans/${planAId}`,
+      headers: { authorization: `Bearer ${ownerBToken}` }
+    });
+    expect(getPlanRes.statusCode).toBe(403);
+
+    // 9. PATCH /api/gyms/:gymId/plans/:planId
+    const patchPlanRes = await app.inject({
+      method: 'PATCH',
+      url: `/api/gyms/${gymAId}/plans/${planAId}`,
+      headers: { authorization: `Bearer ${ownerBToken}` },
+      payload: { name: 'Hacked Plan' }
+    });
+    expect(patchPlanRes.statusCode).toBe(403);
+
+    // 10. GET /api/gyms/:gymId/members/:memberId/subscriptions
+    const listSubsRes = await app.inject({
+      method: 'GET',
+      url: `/api/gyms/${gymAId}/members/${memberAId}/subscriptions`,
+      headers: { authorization: `Bearer ${ownerBToken}` }
+    });
+    expect(listSubsRes.statusCode).toBe(403);
+
+    // 11. POST /api/gyms/:gymId/members/:memberId/subscriptions
+    const createSubRes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymAId}/members/${memberAId}/subscriptions`,
+      headers: { authorization: `Bearer ${ownerBToken}` },
+      payload: { planId: planAId }
+    });
+    expect(createSubRes.statusCode).toBe(403);
+
+    // 12. GET /api/gyms/:gymId/subscriptions/:subscriptionId
+    const getSubRes = await app.inject({
+      method: 'GET',
+      url: `/api/gyms/${gymAId}/subscriptions/${subAId}`,
+      headers: { authorization: `Bearer ${ownerBToken}` }
+    });
+    expect(getSubRes.statusCode).toBe(403);
+
+    // 13. POST /api/gyms/:gymId/subscriptions/:subscriptionId/cancel
+    const cancelSubRes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymAId}/subscriptions/${subAId}/cancel`,
+      headers: { authorization: `Bearer ${ownerBToken}` }
+    });
+    expect(cancelSubRes.statusCode).toBe(403);
   });
 
   // Verification of Body Isolation (Payload injection with foreign gym ID)
@@ -305,6 +481,46 @@ describe('Route Registry & Cross-Tenant Isolation Enforcement', () => {
     });
     expect(patchBodyRes.statusCode).toBe(403);
     expect(JSON.parse(patchBodyRes.payload).error).toMatch(/Cross-tenant violation/i);
+
+    // POST /api/gyms/:gymId/plans with body gymId = gymBId
+    const planBodyRes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymAId}/plans`,
+      headers: { authorization: `Bearer ${ownerAToken}` },
+      payload: { name: 'Alpha 2', durationDays: 30, priceCents: 5000, gymId: gymBId }
+    });
+    expect(planBodyRes.statusCode).toBe(403);
+    expect(JSON.parse(planBodyRes.payload).error).toMatch(/Cross-tenant violation/i);
+
+    // PATCH /api/gyms/:gymId/plans/:planId with body gymId = gymBId
+    const patchPlanBodyRes = await app.inject({
+      method: 'PATCH',
+      url: `/api/gyms/${gymAId}/plans/${planAId}`,
+      headers: { authorization: `Bearer ${ownerAToken}` },
+      payload: { name: 'Alpha Patched', gymId: gymBId }
+    });
+    expect(patchPlanBodyRes.statusCode).toBe(403);
+    expect(JSON.parse(patchPlanBodyRes.payload).error).toMatch(/Cross-tenant violation/i);
+
+    // POST /api/gyms/:gymId/members/:memberId/subscriptions with body gymId = gymBId
+    const subBodyRes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymAId}/members/${memberAId}/subscriptions`,
+      headers: { authorization: `Bearer ${ownerAToken}` },
+      payload: { planId: planAId, gymId: gymBId }
+    });
+    expect(subBodyRes.statusCode).toBe(403);
+    expect(JSON.parse(subBodyRes.payload).error).toMatch(/Cross-tenant violation/i);
+
+    // POST /api/gyms/:gymId/subscriptions/:subscriptionId/cancel with body gymId = gymBId
+    const cancelBodyRes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymAId}/subscriptions/${subAId}/cancel`,
+      headers: { authorization: `Bearer ${ownerAToken}` },
+      payload: { gymId: gymBId }
+    });
+    expect(cancelBodyRes.statusCode).toBe(403);
+    expect(JSON.parse(cancelBodyRes.payload).error).toMatch(/Cross-tenant violation/i);
   });
 
   // Verification of Resource-ID Cross-Tenant Isolation
@@ -336,5 +552,71 @@ describe('Route Registry & Cross-Tenant Isolation Enforcement', () => {
     });
     expect(resetRes.statusCode).toBe(404);
     expect(JSON.parse(resetRes.payload).error).toMatch(/not found in this gym/i);
+
+    // GET /api/gyms/:gymId/plans/:planId where plan belongs to Gym B, but queried under Gym A
+    const getPlanRes = await app.inject({
+      method: 'GET',
+      url: `/api/gyms/${gymAId}/plans/${planBId}`,
+      headers: { authorization: `Bearer ${ownerAToken}` }
+    });
+    expect(getPlanRes.statusCode).toBe(404);
+    expect(JSON.parse(getPlanRes.payload).error).toMatch(/not found in this gym/i);
+
+    // PATCH /api/gyms/:gymId/plans/:planId where plan belongs to Gym B, but edited under Gym A
+    const patchPlanRes = await app.inject({
+      method: 'PATCH',
+      url: `/api/gyms/${gymAId}/plans/${planBId}`,
+      headers: { authorization: `Bearer ${ownerAToken}` },
+      payload: { name: 'Intruder Plan Update' }
+    });
+    expect(patchPlanRes.statusCode).toBe(404);
+    expect(JSON.parse(patchPlanRes.payload).error).toMatch(/not found in this gym/i);
+
+    // GET /api/gyms/:gymId/members/:memberId/subscriptions where member belongs to Gym B
+    const getMemberSubsRes = await app.inject({
+      method: 'GET',
+      url: `/api/gyms/${gymAId}/members/${memberBId}/subscriptions`,
+      headers: { authorization: `Bearer ${ownerAToken}` }
+    });
+    expect(getMemberSubsRes.statusCode).toBe(404);
+    expect(JSON.parse(getMemberSubsRes.payload).error).toMatch(/not found in this gym/i);
+
+    // POST /api/gyms/:gymId/members/:memberId/subscriptions where member belongs to Gym B
+    const postMemberSubsRes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymAId}/members/${memberBId}/subscriptions`,
+      headers: { authorization: `Bearer ${ownerAToken}` },
+      payload: { planId: planAId }
+    });
+    expect(postMemberSubsRes.statusCode).toBe(404);
+    expect(JSON.parse(postMemberSubsRes.payload).error).toMatch(/not found in this gym/i);
+
+    // POST /api/gyms/:gymId/members/:memberId/subscriptions where plan belongs to Gym B (cross-tenant plan hijack)
+    const postCrossPlanRes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymAId}/members/${memberAId}/subscriptions`,
+      headers: { authorization: `Bearer ${ownerAToken}` },
+      payload: { planId: planBId }
+    });
+    expect(postCrossPlanRes.statusCode).toBe(404);
+    expect(JSON.parse(postCrossPlanRes.payload).error).toMatch(/plan not found in this gym/i);
+
+    // GET /api/gyms/:gymId/subscriptions/:subscriptionId where subscription belongs to Gym B
+    const getSubRes = await app.inject({
+      method: 'GET',
+      url: `/api/gyms/${gymAId}/subscriptions/${subBId}`,
+      headers: { authorization: `Bearer ${ownerAToken}` }
+    });
+    expect(getSubRes.statusCode).toBe(404);
+    expect(JSON.parse(getSubRes.payload).error).toMatch(/not found in this gym/i);
+
+    // POST /api/gyms/:gymId/subscriptions/:subscriptionId/cancel where subscription belongs to Gym B
+    const cancelSubRes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymAId}/subscriptions/${subBId}/cancel`,
+      headers: { authorization: `Bearer ${ownerAToken}` }
+    });
+    expect(cancelSubRes.statusCode).toBe(404);
+    expect(JSON.parse(cancelSubRes.payload).error).toMatch(/not found in this gym/i);
   });
 });

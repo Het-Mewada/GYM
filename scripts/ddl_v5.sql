@@ -96,6 +96,7 @@ CREATE TABLE user_gym_memberships (
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   role VARCHAR(20) NOT NULL CHECK (role IN ('owner', 'manager', 'staff', 'trainer')),
   is_active BOOLEAN NOT NULL DEFAULT true,
+  password_hash VARCHAR(255),
   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT unique_user_gym UNIQUE (gym_id, user_id)
 );
@@ -703,6 +704,50 @@ END;
 $$;
 ALTER FUNCTION auth_lookup_user_by_phone OWNER TO definer_admin;
 
+CREATE OR REPLACE FUNCTION auth_lookup_user_by_identifier(p_identifier VARCHAR)
+RETURNS TABLE (
+  out_user_id UUID,
+  out_phone VARCHAR,
+  out_email VARCHAR,
+  out_password_hash VARCHAR,
+  out_full_name VARCHAR,
+  out_is_platform_admin BOOLEAN
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  RETURN QUERY
+  SELECT u.id, u.phone, u.email, u.password_hash, u.full_name, u.is_platform_admin
+  FROM users u
+  WHERE u.phone = p_identifier OR LOWER(COALESCE(u.email, '')) = LOWER(p_identifier);
+END;
+$$;
+ALTER FUNCTION auth_lookup_user_by_identifier OWNER TO definer_admin;
+
+CREATE OR REPLACE FUNCTION auth_lookup_user_by_id(p_user_id UUID)
+RETURNS TABLE (
+  out_user_id UUID,
+  out_phone VARCHAR,
+  out_email VARCHAR,
+  out_password_hash VARCHAR,
+  out_full_name VARCHAR,
+  out_is_platform_admin BOOLEAN
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  RETURN QUERY
+  SELECT u.id, u.phone, u.email, u.password_hash, u.full_name, u.is_platform_admin
+  FROM users u
+  WHERE u.id = p_user_id;
+END;
+$$;
+ALTER FUNCTION auth_lookup_user_by_id OWNER TO definer_admin;
+
 -- Function 2: Complete Password Reset
 CREATE OR REPLACE FUNCTION auth_complete_password_reset(
   p_token_hash VARCHAR,
@@ -970,7 +1015,8 @@ CREATE OR REPLACE FUNCTION provision_gym(
   p_country VARCHAR(2),
   p_timezone VARCHAR(50),
   p_currency VARCHAR(3),
-  p_tax_basis_points BIGINT
+  p_tax_basis_points BIGINT,
+  p_password_hash VARCHAR DEFAULT NULL
 )
 RETURNS UUID
 LANGUAGE plpgsql
@@ -1000,8 +1046,8 @@ BEGIN
   INSERT INTO receipt_sequences (gym_id, last_receipt_number) VALUES (v_gym_id, 0);
   INSERT INTO member_sequences (gym_id, last_member_number) VALUES (v_gym_id, 0);
 
-  INSERT INTO user_gym_memberships (gym_id, user_id, role)
-  VALUES (v_gym_id, p_owner_id, 'owner');
+  INSERT INTO user_gym_memberships (gym_id, user_id, role, password_hash)
+  VALUES (v_gym_id, p_owner_id, 'owner', p_password_hash);
 
   RETURN v_gym_id;
 END;
@@ -1344,6 +1390,7 @@ REVOKE ALL ON users, tenants FROM app_user;
 -- Grants on tenant-scoped tables
 GRANT SELECT, INSERT, UPDATE, DELETE ON members, membership_plans, subscriptions, subscription_freezes, csv_import_jobs, staff_invitations, user_gym_memberships TO app_user;
 GRANT SELECT, INSERT, UPDATE ON refresh_tokens TO app_user;
+GRANT SELECT ON tenants TO app_user;
 GRANT SELECT, INSERT ON payment_transactions, attendance_logs, notification_logs, audit_logs, subscription_adjustments TO app_user;
 REVOKE UPDATE, DELETE, TRUNCATE ON payment_transactions, attendance_logs, audit_logs, notification_logs, subscription_adjustments FROM app_user;
 
@@ -1357,6 +1404,8 @@ GRANT EXECUTE ON FUNCTION _generate_next_receipt_number_internal(UUID, TIMESTAMP
 -- Execute permissions on SECURITY DEFINER functions
 GRANT EXECUTE ON FUNCTION auth_register_user TO app_user;
 GRANT EXECUTE ON FUNCTION auth_lookup_user_by_phone TO app_user;
+GRANT EXECUTE ON FUNCTION auth_lookup_user_by_identifier TO app_user;
+GRANT EXECUTE ON FUNCTION auth_lookup_user_by_id TO app_user;
 GRANT EXECUTE ON FUNCTION auth_complete_password_reset TO app_user;
 GRANT EXECUTE ON FUNCTION auth_request_password_reset TO app_user;
 GRANT EXECUTE ON FUNCTION auth_create_staff_password_reset TO app_user;

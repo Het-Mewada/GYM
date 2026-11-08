@@ -42,8 +42,8 @@ export default function HomePage() {
   };
 
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center p-8 text-center bg-neutral-950 text-neutral-100">
-      <div className="max-w-2xl border border-neutral-800 bg-neutral-900/60 p-8 rounded-xl shadow-2xl backdrop-blur-sm">
+    <main className="flex min-h-screen flex-col items-center justify-center p-6 md:p-12 text-center bg-neutral-950 text-neutral-100">
+      <div className="w-full max-w-4xl border border-neutral-800 bg-neutral-900/60 p-8 md:p-12 rounded-2xl shadow-2xl backdrop-blur-sm">
         <div className="inline-block px-3 py-1 mb-4 text-xs font-semibold tracking-wider uppercase text-emerald-400 bg-emerald-950/80 border border-emerald-800 rounded-full">
           {isAuthenticated ? (
             gymName ? `Authenticated • ${gymName}` : `Signed in as ${userName || 'User'}`
@@ -71,6 +71,12 @@ export default function HomePage() {
           </Link>
           {isAuthenticated ? (
             <>
+              <Link
+                href="/plans"
+                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-neutral-900 hover:bg-neutral-800 text-white font-medium text-sm transition border border-neutral-800"
+              >
+                Membership Plans
+              </Link>
               {isSuperAdmin && (
                 <Link
                   href="/platform/tenants"

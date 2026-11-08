@@ -1,15 +1,24 @@
 'use client';
 
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
   type Member,
   type CreateMemberInput,
   type UpdateMemberInput,
+  type MembershipPlan,
+  type SubscriptionItem,
+  type GymMembershipItem,
   fetchMembers,
   createMember,
-  updateMember
+  updateMember,
+  fetchMembershipPlans,
+  fetchMemberSubscriptions,
+  createSubscription,
+  cancelSubscription,
+  switchGymTenant,
+  fetchPlatformTenants
 } from '../lib/api';
 
 export default function MembersPage() {
@@ -17,6 +26,22 @@ export default function MembersPage() {
   const [isCheckingAuth, setIsCheckingAuth] = useState<boolean>(true);
   const [gymId, setGymId] = useState<string>('');
   const [gymName, setGymName] = useState<string | null>(null);
+
+  // Gym Selector & Tenant Switching State
+  const [accessibleGyms, setAccessibleGyms] = useState<Array<{
+    id: string;
+    name: string;
+    slug?: string;
+    role?: string;
+    requiresPassword?: boolean;
+  }>>([]);
+  const [isGymDropdownOpen, setIsGymDropdownOpen] = useState(false);
+  const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
+  const [targetSwitchGym, setTargetSwitchGym] = useState<{ id: string; name: string; slug?: string } | null>(null);
+  const [switchPassword, setSwitchPassword] = useState('');
+  const [switchError, setSwitchError] = useState<string | null>(null);
+  const [isSwitching, setIsSwitching] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [userName, setUserName] = useState<string | null>(null);
   const [isSuperAdmin, setIsSuperAdmin] = useState<boolean>(false);
@@ -59,6 +84,31 @@ export default function MembersPage() {
   const [editEmergencyContactPhone, setEditEmergencyContactPhone] = useState('');
   const [editStatus, setEditStatus] = useState<'active' | 'inactive' | 'banned'>('active');
 
+  // Subscription Modal State
+  const [subscriptionMember, setSubscriptionMember] = useState<Member | null>(null);
+  const [memberSubscriptions, setMemberSubscriptions] = useState<SubscriptionItem[]>([]);
+  const [availablePlans, setAvailablePlans] = useState<MembershipPlan[]>([]);
+  const [isLoadingSubscriptions, setIsLoadingSubscriptions] = useState(false);
+  const [subModalError, setSubModalError] = useState<string | null>(null);
+  const [subModalSuccess, setSubModalSuccess] = useState<string | null>(null);
+  const [isSubmittingSubscription, setIsSubmittingSubscription] = useState(false);
+
+  // New Subscription Form State
+  const [selectedPlanId, setSelectedPlanId] = useState('');
+  const [customStartDate, setCustomStartDate] = useState('');
+  const [discountAmount, setDiscountAmount] = useState('0');
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setIsGymDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
   // Check auth session and fetch initial members immediately on mount
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -82,6 +132,60 @@ export default function MembersPage() {
       if (storedGymId) setGymId(storedGymId);
       if (storedGymName) setGymName(storedGymName);
       setIsCheckingAuth(false);
+
+      // Load accessible gyms for header dropdown selector
+      const storedMemberships = localStorage.getItem('user_memberships');
+      const allMemberships = localStorage.getItem('all_user_memberships');
+      let initialGyms: Array<{ id: string; name: string; slug?: string; role?: string; requiresPassword?: boolean }> = [];
+
+      if (allMemberships) {
+        try {
+          const parsedAll: GymMembershipItem[] = JSON.parse(allMemberships);
+          initialGyms = parsedAll.map((m) => ({
+            id: m.gym_id,
+            name: m.gym_name || 'Gym Tenant',
+            slug: m.gym_slug,
+            role: m.role,
+            requiresPassword: !m.isUnlocked
+          }));
+        } catch { /* ignore */ }
+      } else if (storedMemberships) {
+        try {
+          const parsed: GymMembershipItem[] = JSON.parse(storedMemberships);
+          initialGyms = parsed.map((m) => ({
+            id: m.gym_id,
+            name: m.gym_name || 'Gym Tenant',
+            slug: m.gym_slug,
+            role: m.role,
+            requiresPassword: false
+          }));
+        } catch { /* ignore */ }
+      }
+
+      if (initialGyms.length > 0) {
+        setAccessibleGyms(initialGyms);
+      }
+
+      // Fetch fresh list from server
+      fetchPlatformTenants(token)
+        .then((res) => {
+          if (res && Array.isArray(res.tenants)) {
+            setAccessibleGyms((prev) => {
+              const map = new Map<string, { id: string; name: string; slug?: string; role?: string; requiresPassword?: boolean }>();
+              prev.forEach((g) => map.set(g.id, g));
+              res.tenants.forEach((t) => {
+                if (!map.has(t.id)) {
+                  map.set(t.id, { id: t.id, name: t.name, slug: t.slug, role: (t as unknown as { role?: string }).role, requiresPassword: false });
+                } else {
+                  const existing = map.get(t.id)!;
+                  map.set(t.id, { ...existing, name: t.name, slug: t.slug });
+                }
+              });
+              return Array.from(map.values());
+            });
+          }
+        })
+        .catch(() => { /* fallback to local list */ });
 
       if (storedGymId) {
         setIsLoading(true);
@@ -128,6 +232,69 @@ export default function MembersPage() {
       setIsLoading(false);
     }
   }, [gymId, searchQuery, statusFilter]);
+
+  const performSwitchGym = (newGymId: string, newGymName: string) => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('gym_id', newGymId);
+      localStorage.setItem('gym_name', newGymName);
+    }
+    setGymId(newGymId);
+    setGymName(newGymName);
+    setIsGymDropdownOpen(false);
+    setIsLoading(true);
+    setError(null);
+    fetchMembers(newGymId)
+      .then((res) => {
+        if (res && Array.isArray(res.members)) {
+          setMembers(res.members);
+        }
+      })
+      .catch((err: unknown) => {
+        setError(err instanceof Error ? err.message : 'Failed to fetch members for switched gym');
+      })
+      .finally(() => {
+        setIsLoading(false);
+      });
+  };
+
+  const handleGymSelect = (gym: { id: string; name: string; slug?: string; role?: string; requiresPassword?: boolean }) => {
+    if (gym.id === gymId) {
+      setIsGymDropdownOpen(false);
+      return;
+    }
+
+    if (gym.requiresPassword) {
+      setTargetSwitchGym(gym);
+      setSwitchPassword('');
+      setSwitchError(null);
+      setIsPasswordModalOpen(true);
+      setIsGymDropdownOpen(false);
+      return;
+    }
+
+    performSwitchGym(gym.id, gym.name);
+  };
+
+  const handleConfirmSwitchPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!targetSwitchGym) return;
+    setIsSwitching(true);
+    setSwitchError(null);
+    try {
+      await switchGymTenant(targetSwitchGym.id, switchPassword);
+      setAccessibleGyms((prev) =>
+        prev.map((g) => (g.id === targetSwitchGym.id ? { ...g, requiresPassword: false } : g))
+      );
+      performSwitchGym(targetSwitchGym.id, targetSwitchGym.name);
+      setIsPasswordModalOpen(false);
+      setTargetSwitchGym(null);
+      setSwitchPassword('');
+    } catch (err: unknown) {
+      setSwitchError(err instanceof Error ? err.message : 'Incorrect password for this gym');
+    } finally {
+      setIsSwitching(false);
+    }
+  };
 
   // Handle debounced search/filter changes after initial load is done
   useEffect(() => {
@@ -355,6 +522,146 @@ export default function MembersPage() {
     }
   };
 
+  const handleOpenSubscriptionsModal = async (member: Member) => {
+    setSubscriptionMember(member);
+    setSubModalError(null);
+    setSubModalSuccess(null);
+    setSelectedPlanId('');
+    setCustomStartDate('');
+    setDiscountAmount('0');
+    setIsLoadingSubscriptions(true);
+
+    const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined;
+    if (token && gymId) {
+      try {
+        const [plansRes, subsRes] = await Promise.all([
+          fetchMembershipPlans(gymId, true, token),
+          fetchMemberSubscriptions(gymId, member.id, token)
+        ]);
+        if (plansRes && Array.isArray(plansRes.plans)) {
+          setAvailablePlans(plansRes.plans);
+          if (plansRes.plans.length > 0) {
+            setSelectedPlanId(plansRes.plans[0].id);
+          }
+        }
+        if (subsRes && Array.isArray(subsRes.subscriptions)) {
+          setMemberSubscriptions(subsRes.subscriptions);
+        }
+      } catch (err: unknown) {
+        setSubModalError(err instanceof Error ? err.message : 'Failed to load member subscriptions');
+      } finally {
+        setIsLoadingSubscriptions(false);
+      }
+    } else {
+      // Local preview simulation
+      const samplePlans: MembershipPlan[] = [
+        { id: 'plan-1', gymId: 'local-gym', name: 'Monthly Gold', durationDays: 30, priceCents: 300000, isActive: true, createdAt: new Date().toISOString() },
+        { id: 'plan-2', gymId: 'local-gym', name: 'Quarterly Platinum', durationDays: 90, priceCents: 800000, isActive: true, createdAt: new Date().toISOString() }
+      ];
+      setAvailablePlans(samplePlans);
+      setSelectedPlanId('plan-1');
+      setIsLoadingSubscriptions(false);
+    }
+  };
+
+  const handleCloseSubscriptionsModal = () => {
+    setSubscriptionMember(null);
+    setSubModalError(null);
+    setSubModalSuccess(null);
+  };
+
+  const handleCreateSubscriptionSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!subscriptionMember) return;
+    setSubModalError(null);
+
+    if (!selectedPlanId) {
+      setSubModalError('Please select a membership plan');
+      return;
+    }
+
+    const discountCents = Math.round(parseFloat(discountAmount || '0') * 100);
+    setIsSubmittingSubscription(true);
+
+    try {
+      const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined;
+      if (token && gymId) {
+        const res = await createSubscription(gymId, subscriptionMember.id, {
+          planId: selectedPlanId,
+          startDate: customStartDate || undefined,
+          discountCents
+        }, token);
+
+        if (res && res.subscription) {
+          const plan = availablePlans.find((p) => p.id === selectedPlanId);
+          const fullSub: SubscriptionItem = {
+            ...res.subscription,
+            planName: plan?.name,
+            planDurationDays: plan?.durationDays
+          };
+          setMemberSubscriptions((prev) => [fullSub, ...prev]);
+          setSubModalSuccess('Subscription assigned successfully!');
+        }
+      } else {
+        // Preview mode simulation
+        const plan = availablePlans.find((p) => p.id === selectedPlanId);
+        const duration = plan?.durationDays || 30;
+        const start = customStartDate || new Date().toISOString().split('T')[0];
+        const endD = new Date(start);
+        endD.setUTCDate(endD.getUTCDate() + (duration - 1));
+
+        const simSub: SubscriptionItem = {
+          id: `sim-sub-${Date.now()}`,
+          gymId: 'preview-mode',
+          memberId: subscriptionMember.id,
+          planId: selectedPlanId,
+          status: start <= new Date().toISOString().split('T')[0] ? 'active' : 'queued',
+          startDate: start,
+          endDate: endD.toISOString().split('T')[0],
+          totalPriceCents: plan?.priceCents || 300000,
+          discountCents,
+          createdAt: new Date().toISOString(),
+          planName: plan?.name || 'Standard Plan',
+          planDurationDays: duration
+        };
+        setMemberSubscriptions((prev) => [simSub, ...prev]);
+        setSubModalSuccess('Subscription assigned in preview mode!');
+      }
+
+      setCustomStartDate('');
+      setDiscountAmount('0');
+    } catch (err: unknown) {
+      setSubModalError(err instanceof Error ? err.message : 'Failed to create subscription');
+    } finally {
+      setIsSubmittingSubscription(false);
+    }
+  };
+
+  const handleCancelSub = async (subId: string) => {
+    if (!subscriptionMember) return;
+    setSubModalError(null);
+
+    const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined;
+    if (token && gymId) {
+      try {
+        const res = await cancelSubscription(gymId, subId, token);
+        if (res && res.subscription) {
+          setMemberSubscriptions((prev) =>
+            prev.map((s) => (s.id === subId ? { ...s, status: 'cancelled' } : s))
+          );
+          setSubModalSuccess('Subscription cancelled.');
+        }
+      } catch (err: unknown) {
+        setSubModalError(err instanceof Error ? err.message : 'Failed to cancel subscription');
+      }
+    } else {
+      setMemberSubscriptions((prev) =>
+        prev.map((s) => (s.id === subId ? { ...s, status: 'cancelled' } : s))
+      );
+      setSubModalSuccess('Subscription cancelled.');
+    }
+  };
+
   // Filtered members list
   const displayedMembers = useMemo(() => {
     if (isAuthenticated) {
@@ -391,7 +698,7 @@ export default function MembersPage() {
     <div className="min-h-screen bg-neutral-950 text-neutral-100 antialiased flex flex-col">
       {/* Top Navigation */}
       <header className="border-b border-neutral-800 bg-neutral-900/80 backdrop-blur-md sticky top-0 z-30 px-6 py-4">
-        <div className="max-w-7xl mx-auto flex items-center justify-between">
+        <div className="w-full flex items-center justify-between">
           <div className="flex items-center space-x-4">
             <Link href="/" className="flex items-center space-x-2">
               <span className="flex items-center justify-center w-8 h-8 rounded-lg bg-emerald-500 font-bold text-black text-sm">
@@ -402,16 +709,112 @@ export default function MembersPage() {
               </span>
             </Link>
             <span className="text-neutral-600">/</span>
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-neutral-800 text-neutral-300 border border-neutral-700">
-              {gymName ? (
-                <>
-                  <span className="font-semibold text-emerald-400">{gymName}</span>
-                  {isSuperAdmin && <span className="text-[10px] text-neutral-400">• Super Admin Mode</span>}
-                </>
-              ) : (
-                'Tenanted Pod'
+            {/* Gym Selector Dropdown */}
+            <div className="relative" ref={dropdownRef}>
+              <button
+                type="button"
+                onClick={() => setIsGymDropdownOpen((prev) => !prev)}
+                className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium bg-neutral-900 hover:bg-neutral-800/90 text-neutral-200 border border-neutral-700/80 hover:border-emerald-500/50 transition cursor-pointer shadow-sm group"
+                title="Switch active gym tenant"
+              >
+                <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
+                <span className="font-semibold text-emerald-400 group-hover:text-emerald-300 transition">
+                  {gymName || 'Select Gym'}
+                </span>
+                {isSuperAdmin && (
+                  <span className="text-[10px] text-neutral-400 font-normal border-l border-neutral-700 pl-1.5">
+                    Super Admin
+                  </span>
+                )}
+                <svg
+                  className={`w-3.5 h-3.5 text-neutral-400 transition-transform duration-150 ${isGymDropdownOpen ? 'rotate-180' : ''}`}
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.5"
+                  viewBox="0 0 24 24"
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
+                </svg>
+              </button>
+
+              {/* Dropdown Menu */}
+              {isGymDropdownOpen && (
+                <div className="absolute left-0 mt-2 w-72 rounded-xl bg-neutral-900 border border-neutral-800 shadow-2xl p-2 z-50 animate-in fade-in zoom-in-95 duration-100">
+                  <div className="px-3 py-2 border-b border-neutral-800 flex items-center justify-between">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-400">
+                      Switch Gym Tenant
+                    </span>
+                    <span className="text-[10px] text-emerald-400 font-semibold font-mono">
+                      {accessibleGyms.length} Location{accessibleGyms.length === 1 ? '' : 's'}
+                    </span>
+                  </div>
+
+                  <div className="py-1 max-h-60 overflow-y-auto space-y-1">
+                    {accessibleGyms.length === 0 ? (
+                      <div className="px-3 py-3 text-center text-xs text-neutral-500">
+                        No additional gyms found.
+                      </div>
+                    ) : (
+                      accessibleGyms.map((gym) => {
+                        const isActive = gym.id === gymId;
+                        return (
+                          <button
+                            key={gym.id}
+                            type="button"
+                            onClick={() => handleGymSelect(gym)}
+                            className={`w-full px-3 py-2 rounded-lg text-left text-xs flex items-center justify-between transition cursor-pointer ${
+                              isActive
+                                ? 'bg-emerald-950/70 text-emerald-300 font-semibold border border-emerald-800/80 shadow-sm'
+                                : 'text-neutral-300 hover:bg-neutral-800/90 hover:text-white'
+                            }`}
+                          >
+                            <div className="truncate pr-2">
+                              <div className="font-medium text-white truncate flex items-center gap-1.5">
+                                {gym.name}
+                                {isActive && (
+                                  <span className="text-[9px] px-1.5 py-0.2 rounded bg-emerald-900/80 text-emerald-300 border border-emerald-700">
+                                    Active
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-[10px] text-neutral-500 font-mono truncate">
+                                {gym.slug ? `${gym.slug}.gymos.local` : gym.id.slice(0, 8)}
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-1.5 flex-shrink-0">
+                              {gym.role && (
+                                <span className="text-[9px] uppercase px-1.5 py-0.5 rounded bg-neutral-800 text-neutral-400 border border-neutral-700">
+                                  {gym.role}
+                                </span>
+                              )}
+                              {gym.requiresPassword && !isActive && (
+                                <span title="Distinct password required for this gym" className="text-amber-400 text-xs">
+                                  🔒
+                                </span>
+                              )}
+                            </div>
+                          </button>
+                        );
+                      })
+                    )}
+                  </div>
+
+                  {isSuperAdmin && (
+                    <div className="pt-2 mt-1 border-t border-neutral-800">
+                      <Link
+                        href="/platform/tenants"
+                        onClick={() => setIsGymDropdownOpen(false)}
+                        className="flex items-center justify-between px-3 py-2 rounded-lg text-xs text-neutral-300 hover:text-emerald-400 hover:bg-neutral-800/80 transition"
+                      >
+                        <span className="font-medium">Platform Super Admin</span>
+                        <span className="text-emerald-400 font-semibold">Manage →</span>
+                      </Link>
+                    </div>
+                  )}
+                </div>
               )}
-            </span>
+            </div>
           </div>
 
           <div className="flex items-center space-x-6">
@@ -421,6 +824,9 @@ export default function MembersPage() {
               </Link>
               <Link href="/members" className="text-emerald-400 font-semibold border-b-2 border-emerald-400 pb-1">
                 Members
+              </Link>
+              <Link href="/plans" className="text-neutral-400 hover:text-white transition">
+                Plans
               </Link>
               {isSuperAdmin && (
                 <Link href="/platform/tenants" className="text-neutral-400 hover:text-neutral-100 transition">
@@ -457,7 +863,7 @@ export default function MembersPage() {
       </header>
 
       {/* Main Content Area */}
-      <main className="max-w-7xl mx-auto px-6 py-8 flex-1 w-full space-y-6">
+      <main className="w-full px-6 py-8 flex-1 space-y-6">
         {/* Preview Mode Notice Banner */}
         {!isAuthenticated && (
           <div data-testid="preview-mode-banner" className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 rounded-xl border border-emerald-900/60 bg-emerald-950/20 text-emerald-200 text-xs">
@@ -694,7 +1100,18 @@ export default function MembersPage() {
                       <td className="px-6 py-4 whitespace-nowrap text-xs text-neutral-400">
                         {member.joinedDate}
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-right">
+                      <td className="px-6 py-4 whitespace-nowrap text-right space-x-2">
+                        <button
+                          type="button"
+                          data-testid={`manage-subscriptions-${member.id}`}
+                          onClick={() => handleOpenSubscriptionsModal(member)}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-emerald-950/60 hover:bg-emerald-900/80 text-emerald-300 border border-emerald-800/80 transition cursor-pointer"
+                        >
+                          <svg className="w-3.5 h-3.5 text-emerald-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v12m-3-2.818l.879.659c1.171.879 3.07.879 4.242 0 1.172-.879 1.172-2.303 0-3.182C13.536 12.219 12.768 12 12 12c-.725 0-1.45-.22-2.003-.659-1.106-.879-1.106-2.303 0-3.182s2.9-.879 4.006 0l.415.33M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                          </svg>
+                          Subscriptions
+                        </button>
                         <button
                           type="button"
                           data-testid={`edit-member-${member.id}`}
@@ -722,7 +1139,7 @@ export default function MembersPage() {
           data-testid="add-member-modal"
           className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm"
         >
-          <div className="w-full max-w-lg bg-neutral-900 border border-neutral-800 rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+          <div className="w-full max-w-2xl bg-neutral-900 border border-neutral-800 rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150">
             <div className="px-6 py-5 border-b border-neutral-800 flex items-center justify-between">
               <div>
                 <h3 className="text-lg font-bold text-white">Add New Member</h3>
@@ -913,7 +1330,7 @@ export default function MembersPage() {
           data-testid="edit-member-modal"
           className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm"
         >
-          <div className="w-full max-w-lg bg-neutral-900 border border-neutral-800 rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+          <div className="w-full max-w-2xl bg-neutral-900 border border-neutral-800 rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150">
             <div className="px-6 py-5 border-b border-neutral-800 flex items-center justify-between">
               <div>
                 <div className="flex items-center gap-2">
@@ -1113,6 +1530,322 @@ export default function MembersPage() {
                   className="px-4 py-2 rounded-lg text-sm font-semibold bg-emerald-500 hover:bg-emerald-400 text-black transition shadow-lg shadow-emerald-950/40 disabled:opacity-50 cursor-pointer"
                 >
                   {isEditSubmitting ? 'Saving...' : 'Save Changes'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+      {/* Manage Subscriptions Modal */}
+      {subscriptionMember && (
+        <div
+          data-testid="subscriptions-modal"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm"
+        >
+          <div className="w-full max-w-2xl bg-neutral-900 border border-neutral-800 rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150 flex flex-col max-h-[90vh]">
+            {/* Modal Header */}
+            <div className="px-6 py-5 border-b border-neutral-800 flex items-center justify-between">
+              <div>
+                <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                  <span>Subscriptions for {subscriptionMember.firstName} {subscriptionMember.lastName || ''}</span>
+                  <span className="font-mono text-xs px-2 py-0.5 rounded bg-neutral-800 text-emerald-400 border border-neutral-700">
+                    {subscriptionMember.memberNumber}
+                  </span>
+                </h3>
+                <p className="text-xs text-neutral-400 mt-0.5">
+                  View subscription history, schedule renewal plans, or cancel active memberships.
+                </p>
+              </div>
+              <button
+                type="button"
+                data-testid="close-subscriptions-modal"
+                onClick={handleCloseSubscriptionsModal}
+                className="text-neutral-400 hover:text-white text-lg font-bold p-1 cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-6 overflow-y-auto space-y-6">
+              {/* Alerts */}
+              {subModalError && (
+                <div
+                  data-testid="subscription-error-banner"
+                  className="p-3 rounded-lg bg-red-950/80 border border-red-800 text-red-200 text-xs font-medium"
+                >
+                  {subModalError}
+                </div>
+              )}
+              {subModalSuccess && (
+                <div
+                  data-testid="subscription-success-banner"
+                  className="p-3 rounded-lg bg-emerald-950/80 border border-emerald-800 text-emerald-300 text-xs font-medium"
+                >
+                  {subModalSuccess}
+                </div>
+              )}
+
+              {/* Subscriptions History Section */}
+              <div>
+                <h4 className="text-xs font-semibold uppercase tracking-wider text-neutral-400 mb-3">
+                  Subscription History ({memberSubscriptions.length})
+                </h4>
+
+                {isLoadingSubscriptions ? (
+                  <div className="py-6 text-center space-y-2">
+                    <div className="w-5 h-5 rounded-full border-2 border-emerald-500 border-t-transparent animate-spin mx-auto" />
+                    <p className="text-xs text-neutral-500">Loading subscriptions...</p>
+                  </div>
+                ) : memberSubscriptions.length === 0 ? (
+                  <div
+                    data-testid="no-subscriptions-state"
+                    className="p-4 rounded-xl border border-dashed border-neutral-800 text-center text-xs text-neutral-500"
+                  >
+                    No subscriptions have been assigned to this member yet.
+                  </div>
+                ) : (
+                  <div className="space-y-2.5">
+                    {memberSubscriptions.map((sub) => {
+                      const priceInr = ((sub.totalPriceCents - (sub.discountCents || 0)) / 100).toLocaleString('en-IN', {
+                        style: 'currency',
+                        currency: 'INR',
+                        maximumFractionDigits: 0
+                      });
+
+                      const isCancelable = sub.status === 'active' || sub.status === 'queued';
+
+                      return (
+                        <div
+                          key={sub.id}
+                          data-testid={`subscription-item-${sub.id}`}
+                          className="p-3.5 rounded-xl border border-neutral-800 bg-neutral-950/60 flex items-center justify-between gap-4"
+                        >
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span className="font-semibold text-white text-sm">
+                                {sub.planName || 'Membership Plan'}
+                              </span>
+                              <span
+                                className={`text-[10px] font-semibold px-2 py-0.5 rounded capitalize ${
+                                  sub.status === 'active'
+                                    ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
+                                    : sub.status === 'queued'
+                                    ? 'bg-blue-950 text-blue-400 border border-blue-800'
+                                    : sub.status === 'cancelled'
+                                    ? 'bg-neutral-800 text-neutral-400 border border-neutral-700'
+                                    : 'bg-amber-950 text-amber-400 border border-amber-800'
+                                }`}
+                              >
+                                {sub.status}
+                              </span>
+                            </div>
+                            <div className="text-xs text-neutral-400 mt-1 font-mono">
+                              {sub.startDate} → {sub.endDate}
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-4">
+                            <span className="font-bold text-white text-sm">
+                              {priceInr}
+                            </span>
+                            {isCancelable && (
+                              <button
+                                type="button"
+                                data-testid={`cancel-subscription-${sub.id}`}
+                                onClick={() => handleCancelSub(sub.id)}
+                                className="px-2.5 py-1 rounded bg-neutral-800 hover:bg-red-950 hover:text-red-300 hover:border-red-800 text-[11px] font-medium text-neutral-400 border border-neutral-700 transition cursor-pointer"
+                              >
+                                Cancel
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Assign New Subscription Section */}
+              <div className="pt-4 border-t border-neutral-800">
+                <h4 className="text-xs font-semibold uppercase tracking-wider text-emerald-400 mb-3 flex items-center gap-1.5">
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+                  </svg>
+                  Assign New Subscription
+                </h4>
+
+                <form onSubmit={handleCreateSubscriptionSubmit} className="space-y-4">
+                  {availablePlans.length === 0 ? (
+                    <div className="p-3 rounded-lg border border-neutral-800 bg-neutral-950 text-xs text-neutral-400">
+                      No active plans available.{' '}
+                      <Link href="/plans" className="text-emerald-400 hover:underline">
+                        Create a plan first →
+                      </Link>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-xs font-semibold text-neutral-300 mb-1">
+                            Select Plan <span className="text-emerald-400">*</span>
+                          </label>
+                          <select
+                            data-testid="select-subscription-plan"
+                            required
+                            value={selectedPlanId}
+                            onChange={(e) => setSelectedPlanId(e.target.value)}
+                            className="w-full px-3 py-2 rounded-lg bg-neutral-950 border border-neutral-800 text-sm text-white focus:outline-none focus:border-emerald-500 transition cursor-pointer"
+                          >
+                            {availablePlans.map((p) => (
+                              <option key={p.id} value={p.id}>
+                                {p.name} ({p.durationDays} days • ₹{(p.priceCents / 100).toLocaleString('en-IN')})
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div>
+                          <label className="block text-xs font-semibold text-neutral-300 mb-1">
+                            Start Date <span className="text-neutral-500 font-normal">(Leave blank for automatic queue)</span>
+                          </label>
+                          <input
+                            type="date"
+                            data-testid="subscription-start-date"
+                            value={customStartDate}
+                            onChange={(e) => setCustomStartDate(e.target.value)}
+                            className="w-full px-3 py-2 rounded-lg bg-neutral-950 border border-neutral-800 text-sm text-white focus:outline-none focus:border-emerald-500 transition font-mono"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-xs font-semibold text-neutral-300 mb-1">
+                            Discount (INR ₹) <span className="text-neutral-500 font-normal">(Optional)</span>
+                          </label>
+                          <input
+                            type="number"
+                            data-testid="subscription-discount-amount"
+                            min={0}
+                            step={1}
+                            value={discountAmount}
+                            onChange={(e) => setDiscountAmount(e.target.value)}
+                            className="w-full px-3 py-2 rounded-lg bg-neutral-950 border border-neutral-800 text-sm text-white focus:outline-none focus:border-emerald-500 transition font-mono"
+                          />
+                        </div>
+
+                        {/* Summary Box */}
+                        {(() => {
+                          const plan = availablePlans.find((p) => p.id === selectedPlanId);
+                          if (!plan) return null;
+                          const basePrice = plan.priceCents / 100;
+                          const disc = parseFloat(discountAmount || '0') || 0;
+                          const finalPrice = Math.max(0, basePrice - disc);
+
+                          return (
+                            <div className="p-3 rounded-xl bg-neutral-950/80 border border-neutral-800 text-xs flex flex-col justify-center">
+                              <div className="text-neutral-400">Total payable:</div>
+                              <div className="text-lg font-extrabold text-emerald-400">
+                                ₹{finalPrice.toLocaleString('en-IN')}
+                                {disc > 0 && <span className="text-[11px] text-neutral-500 line-through ml-2">₹{basePrice.toLocaleString('en-IN')}</span>}
+                              </div>
+                            </div>
+                          );
+                        })()}
+                      </div>
+
+                      <div className="flex justify-end pt-2">
+                        <button
+                          type="submit"
+                          data-testid="submit-subscription-button"
+                          disabled={isSubmittingSubscription}
+                          className="px-5 py-2.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-black font-semibold text-xs transition shadow-lg shadow-emerald-950/50 disabled:opacity-50 cursor-pointer"
+                        >
+                          {isSubmittingSubscription ? 'Assigning...' : 'Confirm & Assign Subscription'}
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </form>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* UNLOCK GYM TENANT MODAL (for gyms requiring different password) */}
+      {isPasswordModalOpen && targetSwitchGym && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-sm">
+          <div className="w-full max-w-md bg-neutral-900 border border-neutral-800 rounded-2xl p-6 shadow-2xl space-y-4 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between border-b border-neutral-800 pb-3">
+              <div>
+                <h3 className="text-base font-bold text-white flex items-center gap-2">
+                  <span>🔒</span> Unlock {targetSwitchGym.name}
+                </h3>
+                <p className="text-xs text-neutral-400 mt-0.5">
+                  Tenant authentication required to switch location
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsPasswordModalOpen(false);
+                  setTargetSwitchGym(null);
+                  setSwitchPassword('');
+                  setSwitchError(null);
+                }}
+                className="text-neutral-400 hover:text-white transition p-1 rounded-lg hover:bg-neutral-800"
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="text-xs text-neutral-300 leading-relaxed">
+              This gym tenant is configured with distinct credentials. Please enter your password for{' '}
+              <strong className="text-white">{targetSwitchGym.name}</strong> to switch:
+            </p>
+
+            {switchError && (
+              <div className="p-3 rounded-lg bg-red-950/80 border border-red-800 text-red-200 text-xs">
+                {switchError}
+              </div>
+            )}
+
+            <form onSubmit={handleConfirmSwitchPassword} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-neutral-300 mb-1">
+                  Password for {targetSwitchGym.name}
+                </label>
+                <input
+                  type="password"
+                  required
+                  autoFocus
+                  value={switchPassword}
+                  onChange={(e) => setSwitchPassword(e.target.value)}
+                  placeholder="••••••••••••"
+                  className="w-full px-3 py-2 rounded-lg bg-neutral-950 border border-neutral-800 text-sm text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsPasswordModalOpen(false);
+                    setTargetSwitchGym(null);
+                    setSwitchPassword('');
+                    setSwitchError(null);
+                  }}
+                  className="px-3.5 py-2 rounded-lg text-xs font-medium text-neutral-400 hover:text-white hover:bg-neutral-800 transition cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSwitching}
+                  className="px-4 py-2 rounded-lg text-xs font-semibold bg-emerald-500 hover:bg-emerald-400 text-black transition shadow-lg shadow-emerald-950/40 disabled:opacity-50 cursor-pointer"
+                >
+                  {isSwitching ? 'Verifying...' : 'Unlock & Switch'}
                 </button>
               </div>
             </form>

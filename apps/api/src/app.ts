@@ -8,6 +8,17 @@ import { assertDatabaseRole, createPool } from '@gym/db';
 import { authRoutes } from './auth/routes.js';
 import { gymRoutes } from './routes/gyms.js';
 
+// Polyfill BigInt.prototype.toJSON for clean JSON serialization of database monetary cents & counters
+if (typeof BigInt !== 'undefined' && !('toJSON' in BigInt.prototype)) {
+  Object.defineProperty(BigInt.prototype, 'toJSON', {
+    value: function () {
+      return Number(this);
+    },
+    configurable: true,
+    writable: true
+  });
+}
+
 export interface BuildAppOptions {
   pool?: pg.Pool;
   onRoute?: (routeOptions: RouteOptions) => void;

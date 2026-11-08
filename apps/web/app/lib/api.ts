@@ -34,18 +34,27 @@ export interface MembersResponse {
   offset?: number;
 }
 
+export interface GymMembershipItem {
+  gym_id: string;
+  gym_name?: string;
+  gym_slug?: string;
+  role: string;
+  is_active: boolean;
+  isUnlocked?: boolean;
+  hasCustomPassword?: boolean;
+}
+
 export interface LoginResponse {
   accessToken: string;
   user: {
     id: string;
     fullName: string;
+    phone?: string;
+    email?: string | null;
     isPlatformAdmin: boolean;
   };
-  memberships: Array<{
-    gym_id: string;
-    role: string;
-    is_active: boolean;
-  }>;
+  memberships: GymMembershipItem[];
+  allMemberships?: GymMembershipItem[];
 }
 
 const getApiBaseUrl = () => {
@@ -55,17 +64,37 @@ const getApiBaseUrl = () => {
   return process.env.API_URL || 'http://127.0.0.1:4000/api';
 };
 
-export async function loginUser(phone: string, password: string): Promise<LoginResponse> {
+export async function loginUser(identifier: string, password: string): Promise<LoginResponse> {
   const url = `${getApiBaseUrl()}/auth/login`;
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ phone, password })
+    body: JSON.stringify({ identifier, phone: identifier, email: identifier, password })
   });
 
   if (!res.ok) {
     const errorBody = await res.json().catch(() => ({}));
     throw new Error(errorBody.error || `Login failed: ${res.statusText}`);
+  }
+
+  return res.json();
+}
+
+export async function switchGymTenant(gymId: string, password?: string): Promise<{ success: boolean; gym: { id: string; name: string; slug: string; role: string } }> {
+  const url = `${getApiBaseUrl()}/auth/switch-gym`;
+  const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {})
+    },
+    body: JSON.stringify({ gymId, password })
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(errorBody.error || `Failed to switch gym: ${res.statusText}`);
   }
 
   return res.json();
@@ -257,6 +286,173 @@ export async function createTenantWithAdmin(
   if (!res.ok) {
     const errorBody = await res.json().catch(() => ({}));
     throw new Error(errorBody.error || `Failed to create tenant: ${res.statusText}`);
+  }
+
+  return res.json();
+}
+
+export interface MembershipPlan {
+  id: string;
+  gymId: string;
+  name: string;
+  durationDays: number;
+  priceCents: number;
+  isActive: boolean;
+  createdAt: string;
+}
+
+export interface CreateMembershipPlanInput {
+  name: string;
+  durationDays: number;
+  priceCents: number;
+}
+
+export interface SubscriptionItem {
+  id: string;
+  gymId: string;
+  memberId: string;
+  planId: string;
+  status: 'pending' | 'active' | 'queued' | 'cancelled';
+  startDate: string;
+  endDate: string;
+  totalPriceCents: number;
+  discountCents: number;
+  createdAt: string;
+  planName?: string;
+  planDurationDays?: number;
+}
+
+export interface CreateSubscriptionInput {
+  planId: string;
+  startDate?: string;
+  discountCents?: number;
+}
+
+export async function fetchMembershipPlans(
+  gymId: string,
+  active?: boolean,
+  token?: string
+): Promise<{ plans: MembershipPlan[] }> {
+  const activeToken = token || (typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined);
+  if (!activeToken) throw new Error('Authentication required');
+
+  let url = `${getApiBaseUrl()}/gyms/${gymId}/plans`;
+  if (active !== undefined) {
+    url += `?active=${active}`;
+  }
+
+  const res = await fetch(url, {
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${activeToken}`
+    }
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(errorBody.error || `Failed to fetch plans: ${res.statusText}`);
+  }
+
+  return res.json();
+}
+
+export async function createMembershipPlan(
+  gymId: string,
+  input: CreateMembershipPlanInput,
+  token?: string
+): Promise<{ plan: MembershipPlan }> {
+  const activeToken = token || (typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined);
+  if (!activeToken) throw new Error('Authentication required');
+
+  const url = `${getApiBaseUrl()}/gyms/${gymId}/plans`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${activeToken}`
+    },
+    body: JSON.stringify(input)
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(errorBody.error || `Failed to create plan: ${res.statusText}`);
+  }
+
+  return res.json();
+}
+
+export async function fetchMemberSubscriptions(
+  gymId: string,
+  memberId: string,
+  token?: string
+): Promise<{ subscriptions: SubscriptionItem[] }> {
+  const activeToken = token || (typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined);
+  if (!activeToken) throw new Error('Authentication required');
+
+  const url = `${getApiBaseUrl()}/gyms/${gymId}/members/${memberId}/subscriptions`;
+  const res = await fetch(url, {
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${activeToken}`
+    }
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(errorBody.error || `Failed to fetch member subscriptions: ${res.statusText}`);
+  }
+
+  return res.json();
+}
+
+export async function createSubscription(
+  gymId: string,
+  memberId: string,
+  input: CreateSubscriptionInput,
+  token?: string
+): Promise<{ subscription: SubscriptionItem }> {
+  const activeToken = token || (typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined);
+  if (!activeToken) throw new Error('Authentication required');
+
+  const url = `${getApiBaseUrl()}/gyms/${gymId}/members/${memberId}/subscriptions`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${activeToken}`
+    },
+    body: JSON.stringify(input)
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(errorBody.error || `Failed to create subscription: ${res.statusText}`);
+  }
+
+  return res.json();
+}
+
+export async function cancelSubscription(
+  gymId: string,
+  subscriptionId: string,
+  token?: string
+): Promise<{ subscription: SubscriptionItem }> {
+  const activeToken = token || (typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined);
+  if (!activeToken) throw new Error('Authentication required');
+
+  const url = `${getApiBaseUrl()}/gyms/${gymId}/subscriptions/${subscriptionId}/cancel`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${activeToken}`
+    }
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(errorBody.error || `Failed to cancel subscription: ${res.statusText}`);
   }
 
   return res.json();

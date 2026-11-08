@@ -3,6 +3,7 @@ import type pg from 'pg';
 import crypto from 'node:crypto';
 import { hashPassword, verifyPassword, generateRandomToken, hashToken, DUMMY_ARGON2_HASH } from './crypto.js';
 import { signAccessToken } from './jwt.js';
+import { authenticateUser } from '../middleware/auth.js';
 
 interface AuthPluginOptions {
   pool: pg.Pool;
@@ -67,47 +68,168 @@ export const authRoutes: FastifyPluginAsync<AuthPluginOptions> = async (fastify,
     });
   });
 
-  // 2. LOGIN (Per-IP generous limit to protect shared front-desk gym counters + strict DB per-account throttling)
-  fastify.post('/login', {
+  // 2. LOGIN (Supports Phone or Email, Per-Tenant Password Overrides, and Multi-Tenant Selection)
+  fastify.post<{
+    Body: { phone?: string; email?: string; identifier?: string; password: string; gymSlug?: string; gymId?: string }
+  }>('/login', {
     config: {
       rateLimit: {
         max: 300,
         timeWindow: '15 minutes'
       }
     }
-  }, async (req: FastifyRequest<{
-    Body: { phone: string; password: string }
-  }>, reply: FastifyReply) => {
-    const { phone, password } = req.body;
-    if (!phone || !password) {
-      return reply.status(400).send({ error: 'Phone and password are required' });
+  }, async (req, reply: FastifyReply) => {
+    const rawIdentifier = req.body.identifier || req.body.phone || req.body.email || '';
+    const identifier = rawIdentifier.trim();
+    const { password } = req.body;
+    if (!identifier || !password) {
+      return reply.status(400).send({ error: 'Phone number or email address and password are required' });
     }
 
     // Check database account lockout
-    const lockCheck = await isAccountLocked(pool, phone);
+    const lockCheck = await isAccountLocked(pool, identifier);
     if (lockCheck.isLocked) {
       return reply.status(429).send({
         error: 'Too many failed login attempts for this account. Please try again in 5 minutes.'
       });
     }
 
-    // Lookup user via SECURITY DEFINER function
+    // Lookup user via SECURITY DEFINER function (matches by phone OR email)
     const userRes = await pool.query<{
       out_user_id: string;
+      out_phone: string;
+      out_email: string | null;
       out_password_hash: string;
       out_full_name: string;
       out_is_platform_admin: boolean;
-    }>('SELECT * FROM auth_lookup_user_by_phone($1);', [phone]);
+    }>('SELECT * FROM auth_lookup_user_by_identifier($1);', [identifier]);
 
     const user = userRes.rows[0];
 
     // Dummy hash for unknown users: executes the exact same Argon2id cryptographic workload (~70ms)
     // to prevent timing side-channel user enumeration attacks.
-    const hashToVerify = user?.out_password_hash || DUMMY_ARGON2_HASH;
-    const isValid = await verifyPassword(hashToVerify, password);
+    if (!user) {
+      await verifyPassword(DUMMY_ARGON2_HASH, password);
+      const lockRes = await recordFailedLogin(pool, identifier);
+      if (lockRes.isLocked) {
+        return reply.status(429).send({
+          error: 'Too many failed login attempts for this account. Please try again in 5 minutes.'
+        });
+      }
+      return reply.status(401).send({ error: 'Invalid phone number or password' });
+    }
 
-    if (!user || !isValid) {
-      const lockRes = await recordFailedLogin(pool, phone);
+    // Read user's memberships with tenant information and gym-specific passwords
+    const client = await pool.connect();
+    let memRows: Array<{
+      gym_id: string;
+      gym_name: string;
+      gym_slug: string;
+      role: string;
+      is_active: boolean;
+      password_hash: string | null;
+    }> = [];
+
+    try {
+      await client.query('BEGIN');
+      await client.query("SELECT set_config('app.user_id', $1, true);", [user.out_user_id]);
+
+      const memRes = await client.query<{
+        gym_id: string;
+        gym_name: string;
+        gym_slug: string;
+        role: string;
+        is_active: boolean;
+        password_hash: string | null;
+      }>(`
+        SELECT 
+          ugm.gym_id,
+          t.name AS gym_name,
+          t.slug AS gym_slug,
+          ugm.role,
+          ugm.is_active,
+          ugm.password_hash
+        FROM user_gym_memberships ugm
+        JOIN tenants t ON t.id = ugm.gym_id
+        WHERE ugm.user_id = $1 AND ugm.is_active = true AND t.status = 'active';
+      `, [user.out_user_id]);
+      memRows = memRes.rows;
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    // Verify password across gyms (supporting gym-specific password overrides)
+    const authenticatedMemberships: Array<{
+      gym_id: string;
+      gym_name: string;
+      gym_slug: string;
+      role: string;
+      is_active: boolean;
+    }> = [];
+
+    const allMemberships: Array<{
+      gym_id: string;
+      gym_name: string;
+      gym_slug: string;
+      role: string;
+      is_active: boolean;
+      isUnlocked: boolean;
+      hasCustomPassword: boolean;
+    }> = [];
+
+    let isPlatformAdminValid = false;
+    if (user.out_is_platform_admin) {
+      isPlatformAdminValid = await verifyPassword(user.out_password_hash, password);
+    }
+
+    for (const mem of memRows) {
+      const effectiveHash = mem.password_hash || user.out_password_hash;
+      const matches = await verifyPassword(effectiveHash, password);
+      allMemberships.push({
+        gym_id: mem.gym_id,
+        gym_name: mem.gym_name,
+        gym_slug: mem.gym_slug,
+        role: mem.role,
+        is_active: mem.is_active,
+        isUnlocked: matches,
+        hasCustomPassword: Boolean(mem.password_hash)
+      });
+      if (matches) {
+        authenticatedMemberships.push({
+          gym_id: mem.gym_id,
+          gym_name: mem.gym_name,
+          gym_slug: mem.gym_slug,
+          role: mem.role,
+          is_active: mem.is_active
+        });
+      }
+    }
+
+    const isGlobalValid = await verifyPassword(user.out_password_hash, password);
+
+    // If global password matches and memberships didn't have custom overrides, unlock them
+    if (isGlobalValid && authenticatedMemberships.length === 0 && memRows.length > 0) {
+      for (const mem of memRows) {
+        if (!mem.password_hash) {
+          authenticatedMemberships.push({
+            gym_id: mem.gym_id,
+            gym_name: mem.gym_name,
+            gym_slug: mem.gym_slug,
+            role: mem.role,
+            is_active: mem.is_active
+          });
+        }
+      }
+    }
+
+    const isUserValid = isPlatformAdminValid || authenticatedMemberships.length > 0 || isGlobalValid;
+
+    if (!isUserValid) {
+      const lockRes = await recordFailedLogin(pool, identifier);
       if (lockRes.isLocked) {
         return reply.status(429).send({
           error: 'Too many failed login attempts for this account. Please try again in 5 minutes.'
@@ -117,42 +239,32 @@ export const authRoutes: FastifyPluginAsync<AuthPluginOptions> = async (fastify,
     }
 
     // Success -> Clear failed login state in database
-    await clearAccountLockout(pool, phone);
+    await clearAccountLockout(pool, identifier);
 
-    // Read user's memberships under app.user_id context
-    const client = await pool.connect();
-    let memberships: Array<{ gym_id: string; role: string; is_active: boolean }> = [];
+    // Issue refresh token
+    const clientRefresh = await pool.connect();
     let refreshTokenSecret: string;
-
     try {
-      await client.query('BEGIN');
-      await client.query("SELECT set_config('app.user_id', $1, true);", [user.out_user_id]);
+      await clientRefresh.query('BEGIN');
+      await clientRefresh.query("SELECT set_config('app.user_id', $1, true);", [user.out_user_id]);
 
-      const memRes = await client.query<{ gym_id: string; role: string; is_active: boolean }>(`
-        SELECT gym_id, role, is_active
-        FROM user_gym_memberships
-        WHERE user_id = $1 AND is_active = true;
-      `, [user.out_user_id]);
-      memberships = memRes.rows;
-
-      // Issue refresh token
       refreshTokenSecret = generateRandomToken(32);
       const tokenHash = hashToken(refreshTokenSecret);
       const familyId = crypto.randomUUID();
       const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
-      const gymId = memberships[0]?.gym_id || null;
+      const targetGymId = authenticatedMemberships[0]?.gym_id || (user.out_is_platform_admin ? null : (memRows[0]?.gym_id || null));
 
-      await client.query(`
+      await clientRefresh.query(`
         INSERT INTO refresh_tokens (gym_id, user_id, token_hash, family_id, expires_at)
         VALUES ($1, $2, $3, $4, $5);
-      `, [gymId, user.out_user_id, tokenHash, familyId, expiresAt]);
+      `, [targetGymId, user.out_user_id, tokenHash, familyId, expiresAt]);
 
-      await client.query('COMMIT');
+      await clientRefresh.query('COMMIT');
     } catch (err) {
-      await client.query('ROLLBACK');
+      await clientRefresh.query('ROLLBACK');
       throw err;
     } finally {
-      client.release();
+      clientRefresh.release();
     }
 
     // Set HttpOnly SameSite=Strict cookie
@@ -176,10 +288,124 @@ export const authRoutes: FastifyPluginAsync<AuthPluginOptions> = async (fastify,
       user: {
         id: user.out_user_id,
         fullName: user.out_full_name,
+        phone: user.out_phone,
+        email: user.out_email,
         isPlatformAdmin: user.out_is_platform_admin
       },
-      memberships
+      memberships: authenticatedMemberships.length > 0 ? authenticatedMemberships : (user.out_is_platform_admin ? [] : memRows.map(m => ({ gym_id: m.gym_id, gym_name: m.gym_name, gym_slug: m.gym_slug, role: m.role, is_active: m.is_active }))),
+      allMemberships: allMemberships.length > 0 ? allMemberships : memRows.map(m => ({
+        gym_id: m.gym_id,
+        gym_name: m.gym_name,
+        gym_slug: m.gym_slug,
+        role: m.role,
+        is_active: m.is_active,
+        isUnlocked: true,
+        hasCustomPassword: false
+      }))
     });
+  });
+
+  // 2b. SWITCH GYM TENANT / VERIFY GYM CREDENTIALS
+  fastify.post<{
+    Body: { gymId: string; password?: string }
+  }>('/switch-gym', {
+    preHandler: [authenticateUser]
+  }, async (req, reply: FastifyReply) => {
+    const { gymId, password } = req.body;
+    const user = req.user!;
+
+    if (!gymId) {
+      return reply.status(400).send({ error: 'gymId is required' });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query("SELECT set_config('app.user_id', $1, true);", [user.userId]);
+
+      // If Super Admin, allow switching to any tenant directly
+      if (user.isPlatformAdmin) {
+        const tenantRes = await client.query<{ id: string; name: string; slug: string }>(
+          'SELECT id, name, slug FROM tenants WHERE id = $1;',
+          [gymId]
+        );
+        if (tenantRes.rows.length === 0) {
+          await client.query('ROLLBACK');
+          return reply.status(404).send({ error: 'Gym tenant not found' });
+        }
+        await client.query('COMMIT');
+        return reply.send({
+          success: true,
+          gym: {
+            id: tenantRes.rows[0].id,
+            name: tenantRes.rows[0].name,
+            slug: tenantRes.rows[0].slug,
+            role: 'platform_admin'
+          }
+        });
+      }
+
+      // Query membership in the target gym
+      const memRes = await client.query<{
+        gym_id: string;
+        gym_name: string;
+        gym_slug: string;
+        role: string;
+        is_active: boolean;
+        password_hash: string | null;
+      }>(`
+        SELECT 
+          ugm.gym_id,
+          t.name AS gym_name,
+          t.slug AS gym_slug,
+          ugm.role,
+          ugm.is_active,
+          ugm.password_hash
+        FROM user_gym_memberships ugm
+        JOIN tenants t ON t.id = ugm.gym_id
+        WHERE ugm.user_id = $1 AND ugm.gym_id = $2 AND ugm.is_active = true;
+      `, [user.userId, gymId]);
+
+      if (memRes.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return reply.status(403).send({ error: 'You do not have an active membership in this gym tenant' });
+      }
+
+      const mem = memRes.rows[0];
+
+      // If password is provided, verify it against the gym password or user password
+      if (password) {
+        let hashToTest = mem.password_hash;
+        if (!hashToTest) {
+          const userLookup = await client.query<{ out_password_hash: string }>(
+            'SELECT out_password_hash FROM auth_lookup_user_by_id($1);',
+            [user.userId]
+          );
+          hashToTest = userLookup.rows[0]?.out_password_hash || '';
+        }
+        const isValid = await verifyPassword(hashToTest, password);
+        if (!isValid) {
+          await client.query('ROLLBACK');
+          return reply.status(401).send({ error: 'Incorrect password for this gym tenant' });
+        }
+      }
+
+      await client.query('COMMIT');
+      return reply.send({
+        success: true,
+        gym: {
+          id: mem.gym_id,
+          name: mem.gym_name,
+          slug: mem.gym_slug,
+          role: mem.role
+        }
+      });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
   });
 
   // 3. REFRESH TOKEN ROTATION WITH REUSE DETECTION & CONCURRENCY GRACE WINDOW
