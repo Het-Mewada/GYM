@@ -40,11 +40,22 @@ export const PaymentRecordSchema = z.object({
   memberId: z.string().uuid(),
   subscriptionId: z.string().uuid().optional().nullable(),
   idempotencyKey: z.string().uuid(),
-  amountCents: z.number().int(),
+  amountCents: z.number().int().positive('Payment amount must be greater than 0'),
   method: z.enum(PAYMENT_METHODS),
   externalReference: z.string().max(100).optional().nullable(),
   notes: z.string().max(255).optional().nullable()
 });
+
+export const RefundRecordSchema = z.object({
+  idempotencyKey: z.string().uuid(),
+  amountCents: z.number().int().positive('Refund amount must be greater than 0'),
+  method: z.enum(PAYMENT_METHODS).optional(),
+  cancelSubscription: z.boolean().optional(),
+  notes: z.string().max(255).optional().nullable()
+});
+
+export type PaymentRecordInput = z.infer<typeof PaymentRecordSchema>;
+export type RefundRecordInput = z.infer<typeof RefundRecordSchema>;
 
 export const MembershipPlanCreateSchema = z.object({
   name: z.string().min(1, 'Plan name is required').max(100),

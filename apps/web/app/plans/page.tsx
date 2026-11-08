@@ -9,9 +9,11 @@ import {
   fetchMembershipPlans,
   createMembershipPlan
 } from '../lib/api';
+import { useToast } from '../components/Toast';
 
 export default function PlansPage() {
   const router = useRouter();
+  const toast = useToast();
 
   const [gymId, setGymId] = useState<string>('');
   const [gymName, setGymName] = useState<string | null>(null);
@@ -154,12 +156,17 @@ export default function PlansPage() {
 
   useEffect(() => {
     if (successMessage) {
-      const timer = setTimeout(() => {
-        setSuccessMessage(null);
-      }, 4000);
-      return () => clearTimeout(timer);
+      toast.success(successMessage);
+      setSuccessMessage(null);
     }
-  }, [successMessage]);
+  }, [successMessage, toast]);
+
+  useEffect(() => {
+    if (error) {
+      toast.error(error);
+      setError(null);
+    }
+  }, [error, toast]);
 
   return (
     <div className="min-h-screen bg-neutral-950 text-neutral-100 antialiased flex flex-col">
@@ -192,6 +199,9 @@ export default function PlansPage() {
               </Link>
               <Link href="/plans" className="text-emerald-400 font-semibold border-b-2 border-emerald-400 pb-1">
                 Plans
+              </Link>
+              <Link href="/payments" className="text-neutral-400 hover:text-white transition">
+                Payments
               </Link>
               {isSuperAdmin && (
                 <Link href="/platform/tenants" className="text-neutral-400 hover:text-neutral-100 transition">
@@ -257,29 +267,6 @@ export default function PlansPage() {
             </button>
           </div>
         </div>
-
-        {/* Error Alert */}
-        {error && (
-          <div className="p-3 rounded-lg bg-red-950/80 border border-red-800 text-red-200 text-xs font-medium">
-            {error}
-          </div>
-        )}
-
-        {/* Success Alert */}
-        {successMessage && (
-          <div
-            data-testid="success-banner"
-            className="p-3 rounded-lg bg-emerald-950/80 border border-emerald-800 text-emerald-300 text-xs font-medium flex items-center justify-between"
-          >
-            <span>{successMessage}</span>
-            <button
-              onClick={() => setSuccessMessage(null)}
-              className="text-emerald-400 hover:text-emerald-200 font-bold ml-2 cursor-pointer"
-            >
-              ✕
-            </button>
-          </div>
-        )}
 
         {/* Plans Grid */}
         {isLoading ? (

@@ -3,9 +3,11 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { fetchPlatformTenants, createTenantWithAdmin, type TenantListItem, type CreateTenantInput } from '../../lib/api';
+import { useToast } from '../../components/Toast';
 
 export default function PlatformTenantsPage() {
   const router = useRouter();
+  const toast = useToast();
 
   // Authentication & Session State
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
@@ -100,6 +102,13 @@ export default function PlatformTenantsPage() {
     }
   }, [isSuperAdmin, loadTenants]);
 
+  useEffect(() => {
+    if (error) {
+      toast.error(error);
+      setError(null);
+    }
+  }, [error, toast]);
+
   // Sign out handler
   const handleSignOut = () => {
     if (typeof window !== 'undefined') {
@@ -155,6 +164,8 @@ export default function PlatformTenantsPage() {
     try {
       const token = localStorage.getItem('access_token') || undefined;
       const res = await createTenantWithAdmin(payload, token);
+
+      toast.success(`Tenant "${res.name}" provisioned successfully!`);
 
       setSuccessInfo({
         gymId: res.gymId,
@@ -273,13 +284,6 @@ export default function PlatformTenantsPage() {
                 Dismiss
               </button>
             </div>
-          </div>
-        )}
-
-        {/* Global Error Banner */}
-        {error && (
-          <div className="p-4 rounded-xl bg-red-950/80 border border-red-800 text-red-200 text-xs font-medium">
-            {error}
           </div>
         )}
 

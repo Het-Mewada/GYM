@@ -30,20 +30,23 @@ export async function authenticateUser(req: FastifyRequest, reply: FastifyReply)
 
 export function createRequireTenantMembership(pool: pg.Pool) {
   return async function requireTenantMembership(
-    req: FastifyRequest<{ Params?: { gymId?: string }; Body?: { gymId?: string; gym_id?: string } }>,
+    req: FastifyRequest<any>,
     reply: FastifyReply
   ) {
     if (!req.user) {
       return reply.status(401).send({ error: 'Unauthorized: User authentication required' });
     }
 
-    const routeGymId = req.params?.gymId || (req.headers['x-gym-id'] as string);
+    const params = req.params as Record<string, any> | undefined;
+    const body = req.body as Record<string, any> | undefined;
+
+    const routeGymId = params?.gymId || (req.headers['x-gym-id'] as string);
     if (!routeGymId) {
       return reply.status(400).send({ error: 'Gym ID is required in route params or x-gym-id header' });
     }
 
     // Body tenant cross-validation (Path IDs AND Body IDs)
-    const bodyGymId = req.body?.gymId || req.body?.gym_id;
+    const bodyGymId = body?.gymId || body?.gym_id;
     if (bodyGymId && bodyGymId !== routeGymId) {
       return reply.status(403).send({
         error: `Cross-tenant violation: body gym_id (${bodyGymId}) does not match route gym_id (${routeGymId})`

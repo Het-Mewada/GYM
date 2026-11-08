@@ -447,12 +447,204 @@ export async function cancelSubscription(
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${activeToken}`
-    }
+    },
+    body: JSON.stringify({ gymId })
   });
 
   if (!res.ok) {
     const errorBody = await res.json().catch(() => ({}));
     throw new Error(errorBody.error || `Failed to cancel subscription: ${res.statusText}`);
+  }
+
+  return res.json();
+}
+
+export interface PaymentItem {
+  id: string;
+  gymId: string;
+  memberId: string;
+  subscriptionId: string | null;
+  receiptNumber: string;
+  type: 'payment' | 'refund' | 'adjustment' | 'opening_balance' | 'reversal';
+  method: 'cash' | 'upi' | 'card_pos' | 'bank_transfer';
+  amountCents: number;
+  taxCents: number;
+  currency: string;
+  effectiveDate: string;
+  externalReference?: string | null;
+  notes?: string | null;
+  recordedByUserId: string;
+  createdAt: string;
+  memberFirstName?: string;
+  memberLastName?: string;
+  memberNumber?: string;
+  memberPhone?: string;
+  memberEmail?: string;
+}
+
+export interface MemberFinancialSummary {
+  member: {
+    id: string;
+    firstName: string;
+    lastName: string | null;
+    memberNumber: string;
+  };
+  summary: {
+    totalPaidCents: number;
+    totalRefundedCents: number;
+    netPaidCents: number;
+    totalBilledCents: number;
+    balanceCents: number;
+  };
+  transactions: PaymentItem[];
+}
+
+export async function fetchPayments(
+  gymId: string,
+  options?: { memberId?: string; subscriptionId?: string; limit?: number; offset?: number },
+  token?: string
+): Promise<{ payments: PaymentItem[]; total: number; limit: number; offset: number }> {
+  const activeToken = token || (typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined);
+  if (!activeToken) throw new Error('Authentication required');
+
+  const queryParams = new URLSearchParams();
+  if (options?.memberId) queryParams.set('memberId', options.memberId);
+  if (options?.subscriptionId) queryParams.set('subscriptionId', options.subscriptionId);
+  if (options?.limit) queryParams.set('limit', String(options.limit));
+  if (options?.offset) queryParams.set('offset', String(options.offset));
+
+  const url = `${getApiBaseUrl()}/gyms/${gymId}/payments?${queryParams.toString()}`;
+  const res = await fetch(url, {
+    headers: {
+      'Authorization': `Bearer ${activeToken}`
+    }
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(errorBody.error || `Failed to fetch payments: ${res.statusText}`);
+  }
+
+  return res.json();
+}
+
+export async function recordPayment(
+  gymId: string,
+  payload: {
+    memberId: string;
+    subscriptionId?: string | null;
+    idempotencyKey?: string;
+    amountCents: number;
+    method: 'cash' | 'upi' | 'card_pos' | 'bank_transfer';
+    externalReference?: string | null;
+    notes?: string | null;
+  },
+  token?: string
+): Promise<{ payment: PaymentItem; isReplay: boolean }> {
+  const activeToken = token || (typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined);
+  if (!activeToken) throw new Error('Authentication required');
+
+  const idempotencyKey = payload.idempotencyKey || (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `pay-${Date.now()}`);
+
+  const url = `${getApiBaseUrl()}/gyms/${gymId}/payments`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${activeToken}`
+    },
+    body: JSON.stringify({
+      ...payload,
+      idempotencyKey
+    })
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(errorBody.error || `Failed to record payment: ${res.statusText}`);
+  }
+
+  return res.json();
+}
+
+export async function fetchPaymentReceipt(
+  gymId: string,
+  paymentId: string,
+  token?: string
+): Promise<{ payment: PaymentItem }> {
+  const activeToken = token || (typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined);
+  if (!activeToken) throw new Error('Authentication required');
+
+  const url = `${getApiBaseUrl()}/gyms/${gymId}/payments/${paymentId}`;
+  const res = await fetch(url, {
+    headers: {
+      'Authorization': `Bearer ${activeToken}`
+    }
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(errorBody.error || `Failed to fetch receipt: ${res.statusText}`);
+  }
+
+  return res.json();
+}
+
+export async function refundPayment(
+  gymId: string,
+  paymentId: string,
+  payload: {
+    idempotencyKey?: string;
+    amountCents: number;
+    cancelSubscription?: boolean;
+    notes?: string | null;
+  },
+  token?: string
+): Promise<{ refund: PaymentItem; isReplay: boolean }> {
+  const activeToken = token || (typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined);
+  if (!activeToken) throw new Error('Authentication required');
+
+  const idempotencyKey = payload.idempotencyKey || (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `ref-${Date.now()}`);
+
+  const url = `${getApiBaseUrl()}/gyms/${gymId}/payments/${paymentId}/refund`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${activeToken}`
+    },
+    body: JSON.stringify({
+      ...payload,
+      idempotencyKey
+    })
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(errorBody.error || `Failed to issue refund: ${res.statusText}`);
+  }
+
+  return res.json();
+}
+
+export async function fetchMemberFinancials(
+  gymId: string,
+  memberId: string,
+  token?: string
+): Promise<MemberFinancialSummary> {
+  const activeToken = token || (typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined);
+  if (!activeToken) throw new Error('Authentication required');
+
+  const url = `${getApiBaseUrl()}/gyms/${gymId}/members/${memberId}/financials`;
+  const res = await fetch(url, {
+    headers: {
+      'Authorization': `Bearer ${activeToken}`
+    }
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(errorBody.error || `Failed to fetch financials: ${res.statusText}`);
   }
 
   return res.json();

@@ -154,6 +154,49 @@ const ROUTE_REGISTRY: RouteDeclaration[] = [
     hasBodyIsolationTest: true,
     hasResourceIdIsolationTest: true,
     notes: 'Cancel subscription'
+  },
+  {
+    method: 'GET',
+    url: '/api/gyms/:gymId/payments',
+    isTenantScoped: true,
+    hasPathIsolationTest: true,
+    hasBodyIsolationTest: false,
+    notes: 'List gym payments'
+  },
+  {
+    method: 'POST',
+    url: '/api/gyms/:gymId/payments',
+    isTenantScoped: true,
+    hasPathIsolationTest: true,
+    hasBodyIsolationTest: true,
+    notes: 'Record payment transaction'
+  },
+  {
+    method: 'GET',
+    url: '/api/gyms/:gymId/payments/:paymentId',
+    isTenantScoped: true,
+    hasPathIsolationTest: true,
+    hasBodyIsolationTest: false,
+    hasResourceIdIsolationTest: true,
+    notes: 'Get payment receipt'
+  },
+  {
+    method: 'POST',
+    url: '/api/gyms/:gymId/payments/:paymentId/refund',
+    isTenantScoped: true,
+    hasPathIsolationTest: true,
+    hasBodyIsolationTest: true,
+    hasResourceIdIsolationTest: true,
+    notes: 'Refund payment transaction'
+  },
+  {
+    method: 'GET',
+    url: '/api/gyms/:gymId/members/:memberId/financials',
+    isTenantScoped: true,
+    hasPathIsolationTest: true,
+    hasBodyIsolationTest: false,
+    hasResourceIdIsolationTest: true,
+    notes: 'Get member financial summary'
   }
 ];
 
@@ -174,6 +217,8 @@ describe('Route Registry & Cross-Tenant Isolation Enforcement', () => {
   let planBId: string;
   let subAId: string;
   let subBId: string;
+  let paymentAId: string;
+  let paymentBId: string;
 
   beforeAll(async () => {
     pool = createPool();
@@ -298,6 +343,35 @@ describe('Route Registry & Cross-Tenant Isolation Enforcement', () => {
       payload: { planId: planBId }
     });
     subBId = JSON.parse(subBRes.payload).subscription.id;
+
+    // Create Payments in Gym A and Gym B
+    const payARes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymAId}/payments`,
+      headers: { authorization: `Bearer ${ownerAToken}` },
+      payload: {
+        memberId: memberAId,
+        subscriptionId: subAId,
+        idempotencyKey: crypto.randomUUID(),
+        amountCents: 500000,
+        method: 'upi'
+      }
+    });
+    paymentAId = JSON.parse(payARes.payload).payment.id;
+
+    const payBRes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymBId}/payments`,
+      headers: { authorization: `Bearer ${ownerBToken}` },
+      payload: {
+        memberId: memberBId,
+        subscriptionId: subBId,
+        idempotencyKey: crypto.randomUUID(),
+        amountCents: 600000,
+        method: 'cash'
+      }
+    });
+    paymentBId = JSON.parse(payBRes.payload).payment.id;
   });
 
   afterAll(async () => {
@@ -448,6 +522,56 @@ describe('Route Registry & Cross-Tenant Isolation Enforcement', () => {
       headers: { authorization: `Bearer ${ownerBToken}` }
     });
     expect(cancelSubRes.statusCode).toBe(403);
+
+    // 14. GET /api/gyms/:gymId/payments
+    const listPaymentsRes = await app.inject({
+      method: 'GET',
+      url: `/api/gyms/${gymAId}/payments`,
+      headers: { authorization: `Bearer ${ownerBToken}` }
+    });
+    expect(listPaymentsRes.statusCode).toBe(403);
+
+    // 15. POST /api/gyms/:gymId/payments
+    const createPaymentRes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymAId}/payments`,
+      headers: { authorization: `Bearer ${ownerBToken}` },
+      payload: {
+        memberId: memberAId,
+        idempotencyKey: crypto.randomUUID(),
+        amountCents: 1000,
+        method: 'upi'
+      }
+    });
+    expect(createPaymentRes.statusCode).toBe(403);
+
+    // 16. GET /api/gyms/:gymId/payments/:paymentId
+    const getPaymentRes = await app.inject({
+      method: 'GET',
+      url: `/api/gyms/${gymAId}/payments/${paymentAId}`,
+      headers: { authorization: `Bearer ${ownerBToken}` }
+    });
+    expect(getPaymentRes.statusCode).toBe(403);
+
+    // 17. POST /api/gyms/:gymId/payments/:paymentId/refund
+    const refundRes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymAId}/payments/${paymentAId}/refund`,
+      headers: { authorization: `Bearer ${ownerBToken}` },
+      payload: {
+        idempotencyKey: crypto.randomUUID(),
+        amountCents: 500
+      }
+    });
+    expect(refundRes.statusCode).toBe(403);
+
+    // 18. GET /api/gyms/:gymId/members/:memberId/financials
+    const financialsRes = await app.inject({
+      method: 'GET',
+      url: `/api/gyms/${gymAId}/members/${memberAId}/financials`,
+      headers: { authorization: `Bearer ${ownerBToken}` }
+    });
+    expect(financialsRes.statusCode).toBe(403);
   });
 
   // Verification of Body Isolation (Payload injection with foreign gym ID)
@@ -521,6 +645,36 @@ describe('Route Registry & Cross-Tenant Isolation Enforcement', () => {
     });
     expect(cancelBodyRes.statusCode).toBe(403);
     expect(JSON.parse(cancelBodyRes.payload).error).toMatch(/Cross-tenant violation/i);
+
+    // POST /api/gyms/:gymId/payments with body gymId = gymBId
+    const payBodyRes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymAId}/payments`,
+      headers: { authorization: `Bearer ${ownerAToken}` },
+      payload: {
+        memberId: memberAId,
+        idempotencyKey: crypto.randomUUID(),
+        amountCents: 1000,
+        method: 'upi',
+        gymId: gymBId
+      }
+    });
+    expect(payBodyRes.statusCode).toBe(403);
+    expect(JSON.parse(payBodyRes.payload).error).toMatch(/Cross-tenant violation/i);
+
+    // POST /api/gyms/:gymId/payments/:paymentId/refund with body gymId = gymBId
+    const refundBodyRes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymAId}/payments/${paymentAId}/refund`,
+      headers: { authorization: `Bearer ${ownerAToken}` },
+      payload: {
+        idempotencyKey: crypto.randomUUID(),
+        amountCents: 500,
+        gymId: gymBId
+      }
+    });
+    expect(refundBodyRes.statusCode).toBe(403);
+    expect(JSON.parse(refundBodyRes.payload).error).toMatch(/Cross-tenant violation/i);
   });
 
   // Verification of Resource-ID Cross-Tenant Isolation
@@ -618,5 +772,36 @@ describe('Route Registry & Cross-Tenant Isolation Enforcement', () => {
     });
     expect(cancelSubRes.statusCode).toBe(404);
     expect(JSON.parse(cancelSubRes.payload).error).toMatch(/not found in this gym/i);
+
+    // GET /api/gyms/:gymId/payments/:paymentId where payment belongs to Gym B
+    const getPaymentRes = await app.inject({
+      method: 'GET',
+      url: `/api/gyms/${gymAId}/payments/${paymentBId}`,
+      headers: { authorization: `Bearer ${ownerAToken}` }
+    });
+    expect(getPaymentRes.statusCode).toBe(404);
+    expect(JSON.parse(getPaymentRes.payload).error).toMatch(/not found in this gym/i);
+
+    // POST /api/gyms/:gymId/payments/:paymentId/refund where payment belongs to Gym B
+    const refundPaymentRes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymAId}/payments/${paymentBId}/refund`,
+      headers: { authorization: `Bearer ${ownerAToken}` },
+      payload: {
+        idempotencyKey: crypto.randomUUID(),
+        amountCents: 1000
+      }
+    });
+    expect(refundPaymentRes.statusCode).toBe(404);
+    expect(JSON.parse(refundPaymentRes.payload).error).toMatch(/not found in this gym/i);
+
+    // GET /api/gyms/:gymId/members/:memberId/financials where member belongs to Gym B
+    const getFinancialsRes = await app.inject({
+      method: 'GET',
+      url: `/api/gyms/${gymAId}/members/${memberBId}/financials`,
+      headers: { authorization: `Bearer ${ownerAToken}` }
+    });
+    expect(getFinancialsRes.statusCode).toBe(404);
+    expect(JSON.parse(getFinancialsRes.payload).error).toMatch(/not found in this gym/i);
   });
 });

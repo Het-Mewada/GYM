@@ -77,6 +77,12 @@ export default function HomePage() {
               >
                 Membership Plans
               </Link>
+              <Link
+                href="/payments"
+                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-neutral-900 hover:bg-neutral-800 text-white font-medium text-sm transition border border-neutral-800"
+              >
+                Payments Ledger
+              </Link>
               {isSuperAdmin && (
                 <Link
                   href="/platform/tenants"

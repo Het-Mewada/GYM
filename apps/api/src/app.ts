@@ -53,6 +53,20 @@ export function buildApp(customPoolOrOptions?: pg.Pool | BuildAppOptions) {
     app.addHook('onRoute', onRoute);
   }
 
+  // Support empty JSON bodies gracefully without FST_ERR_CTP_EMPTY_JSON_BODY
+  app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body, done) => {
+    if (!body || (typeof body === 'string' && body.trim() === '')) {
+      done(null, {});
+      return;
+    }
+    try {
+      const json = JSON.parse(body as string);
+      done(null, json);
+    } catch (err) {
+      done(err as Error, undefined);
+    }
+  });
+
   app.register(helmet, { contentSecurityPolicy: false });
   app.register(cors, { origin: true, credentials: true });
   app.register(cookie, {

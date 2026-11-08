@@ -20,9 +20,11 @@ import {
   switchGymTenant,
   fetchPlatformTenants
 } from '../lib/api';
+import { useToast } from '../components/Toast';
 
 export default function MembersPage() {
   const router = useRouter();
+  const toast = useToast();
   const [isCheckingAuth, setIsCheckingAuth] = useState<boolean>(true);
   const [gymId, setGymId] = useState<string>('');
   const [gymName, setGymName] = useState<string | null>(null);
@@ -393,7 +395,13 @@ export default function MembersPage() {
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString()
         };
-        setMembers((prev) => [localMember, ...prev]);
+        setMembers((prev) => {
+          const updated = [localMember, ...prev];
+          if (typeof window !== 'undefined') {
+            localStorage.setItem('local_preview_members', JSON.stringify(updated));
+          }
+          return updated;
+        });
       }
 
       // Reset form and close modal
@@ -416,12 +424,31 @@ export default function MembersPage() {
 
   useEffect(() => {
     if (successMessage) {
-      const timer = setTimeout(() => {
-        setSuccessMessage(null);
-      }, 4000);
-      return () => clearTimeout(timer);
+      toast.success(successMessage);
+      setSuccessMessage(null);
     }
-  }, [successMessage]);
+  }, [successMessage, toast]);
+
+  useEffect(() => {
+    if (error) {
+      toast.error(error);
+      setError(null);
+    }
+  }, [error, toast]);
+
+  useEffect(() => {
+    if (subModalSuccess) {
+      toast.success(subModalSuccess);
+      setSubModalSuccess(null);
+    }
+  }, [subModalSuccess, toast]);
+
+  useEffect(() => {
+    if (subModalError) {
+      toast.error(subModalError);
+      setSubModalError(null);
+    }
+  }, [subModalError, toast]);
 
   const handleOpenEditModal = (member: Member) => {
     setEditingMember(member);
@@ -828,6 +855,9 @@ export default function MembersPage() {
               <Link href="/plans" className="text-neutral-400 hover:text-white transition">
                 Plans
               </Link>
+              <Link href="/payments" className="text-neutral-400 hover:text-white transition">
+                Payments
+              </Link>
               {isSuperAdmin && (
                 <Link href="/platform/tenants" className="text-neutral-400 hover:text-neutral-100 transition">
                   Super Admin
@@ -917,29 +947,6 @@ export default function MembersPage() {
             </button>
           </div>
         </div>
-
-        {/* Error Alert */}
-        {error && (
-          <div className="p-3 rounded-lg bg-red-950/80 border border-red-800 text-red-200 text-xs font-medium">
-            {error}
-          </div>
-        )}
-
-        {/* Success Alert */}
-        {successMessage && (
-          <div
-            data-testid="success-banner"
-            className="p-3 rounded-lg bg-emerald-950/80 border border-emerald-800 text-emerald-300 text-xs font-medium flex items-center justify-between"
-          >
-            <span>{successMessage}</span>
-            <button
-              onClick={() => setSuccessMessage(null)}
-              className="text-emerald-400 hover:text-emerald-200 font-bold ml-2 cursor-pointer"
-            >
-              ✕
-            </button>
-          </div>
-        )}
 
         {/* Quick Stats Cards */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
@@ -1567,24 +1574,6 @@ export default function MembersPage() {
             </div>
 
             <div className="p-6 overflow-y-auto space-y-6">
-              {/* Alerts */}
-              {subModalError && (
-                <div
-                  data-testid="subscription-error-banner"
-                  className="p-3 rounded-lg bg-red-950/80 border border-red-800 text-red-200 text-xs font-medium"
-                >
-                  {subModalError}
-                </div>
-              )}
-              {subModalSuccess && (
-                <div
-                  data-testid="subscription-success-banner"
-                  className="p-3 rounded-lg bg-emerald-950/80 border border-emerald-800 text-emerald-300 text-xs font-medium"
-                >
-                  {subModalSuccess}
-                </div>
-              )}
-
               {/* Subscriptions History Section */}
               <div>
                 <h4 className="text-xs font-semibold uppercase tracking-wider text-neutral-400 mb-3">

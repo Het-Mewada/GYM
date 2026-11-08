@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 import type pg from 'pg';
-import { withTenantContext, members, membershipPlans, subscriptions, eq, and, or, ilike, isNull, desc, sql } from '@gym/db';
+import { withTenantContext, members, membershipPlans, subscriptions, paymentTransactions, eq, and, or, ilike, isNull, desc, sql } from '@gym/db';
+import { PaymentRecordSchema, RefundRecordSchema } from '@gym/shared';
 import { authenticateUser, createRequireTenantMembership } from '../middleware/auth.js';
 import { generateRandomToken, hashToken, hashPassword } from '../auth/crypto.js';
 
@@ -1097,5 +1098,463 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
     }
 
     return reply.send({ subscription: cancelledSub });
+  });
+
+  // 17. LIST PAYMENTS
+  fastify.get<{
+    Params: { gymId: string };
+    Querystring: {
+      memberId?: string;
+      subscriptionId?: string;
+      limit?: string;
+      offset?: string;
+    };
+  }>('/:gymId/payments', { preHandler: [authenticateUser, requireTenant] }, async (req, reply) => {
+    const { gymId } = req.params;
+    const { memberId, subscriptionId, limit = '50', offset = '0' } = req.query;
+    const parsedLimit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 100);
+    const parsedOffset = Math.max(parseInt(offset, 10) || 0, 0);
+
+    const tenantContext = req.tenantContext!;
+
+    const result = await withTenantContext(pool, tenantContext, async (tx) => {
+      const conditions = [eq(paymentTransactions.gymId, gymId)];
+      if (memberId) {
+        conditions.push(eq(paymentTransactions.memberId, memberId));
+      }
+      if (subscriptionId) {
+        conditions.push(eq(paymentTransactions.subscriptionId, subscriptionId));
+      }
+
+      const rows = await tx
+        .select({
+          id: paymentTransactions.id,
+          gymId: paymentTransactions.gymId,
+          memberId: paymentTransactions.memberId,
+          subscriptionId: paymentTransactions.subscriptionId,
+          receiptNumber: paymentTransactions.receiptNumber,
+          type: paymentTransactions.type,
+          method: paymentTransactions.method,
+          amountCents: paymentTransactions.amountCents,
+          taxCents: paymentTransactions.taxCents,
+          currency: paymentTransactions.currency,
+          effectiveDate: paymentTransactions.effectiveDate,
+          externalReference: paymentTransactions.externalReference,
+          parentTransactionId: paymentTransactions.parentTransactionId,
+          notes: paymentTransactions.notes,
+          recordedByUserId: paymentTransactions.recordedByUserId,
+          createdAt: paymentTransactions.createdAt,
+          memberFirstName: members.firstName,
+          memberLastName: members.lastName,
+          memberNumber: members.memberNumber,
+          memberPhone: members.phone
+        })
+        .from(paymentTransactions)
+        .leftJoin(members, and(eq(members.gymId, paymentTransactions.gymId), eq(members.id, paymentTransactions.memberId)))
+        .where(and(...conditions))
+        .orderBy(desc(paymentTransactions.createdAt))
+        .limit(parsedLimit)
+        .offset(parsedOffset);
+
+      const [countResult] = await tx
+        .select({ count: sql<number>`count(*)::int` })
+        .from(paymentTransactions)
+        .where(and(...conditions));
+
+      return {
+        payments: rows,
+        total: countResult?.count || 0,
+        limit: parsedLimit,
+        offset: parsedOffset
+      };
+    });
+
+    return reply.send(result);
+  });
+
+  // 18. RECORD PAYMENT
+  fastify.post<{
+    Params: { gymId: string };
+    Body: {
+      memberId: string;
+      subscriptionId?: string | null;
+      idempotencyKey: string;
+      amountCents: number;
+      method: 'cash' | 'upi' | 'card_pos' | 'bank_transfer';
+      externalReference?: string | null;
+      notes?: string | null;
+    };
+  }>('/:gymId/payments', { preHandler: [authenticateUser, requireTenant] }, async (req, reply) => {
+    const { gymId } = req.params;
+    const tenantContext = req.tenantContext!;
+
+    const parseResult = PaymentRecordSchema.safeParse(req.body);
+    if (!parseResult.success) {
+      return reply.status(400).send({
+        error: 'Validation failed',
+        issues: parseResult.error.format()
+      });
+    }
+
+    const {
+      memberId,
+      subscriptionId,
+      idempotencyKey,
+      amountCents,
+      method,
+      externalReference,
+      notes
+    } = parseResult.data;
+
+    try {
+      const payment = await withTenantContext(pool, tenantContext, async (tx) => {
+        // 1. Idempotency replay check
+        const [existing] = await tx
+          .select()
+          .from(paymentTransactions)
+          .where(and(eq(paymentTransactions.gymId, gymId), eq(paymentTransactions.idempotencyKey, idempotencyKey)));
+
+        if (existing) {
+          return { isReplay: true, transaction: existing };
+        }
+
+        // 2. Validate member exists in this gym
+        const [member] = await tx
+          .select({ id: members.id })
+          .from(members)
+          .where(and(eq(members.gymId, gymId), eq(members.id, memberId), isNull(members.deletedAt)));
+
+        if (!member) {
+          throw new Error('MEMBER_NOT_FOUND');
+        }
+
+        // 3. If subscriptionId provided, validate it belongs to this member and gym
+        if (subscriptionId) {
+          const [sub] = await tx
+            .select({ id: subscriptions.id })
+            .from(subscriptions)
+            .where(and(eq(subscriptions.gymId, gymId), eq(subscriptions.id, subscriptionId), eq(subscriptions.memberId, memberId)));
+
+          if (!sub) {
+            throw new Error('SUBSCRIPTION_NOT_FOUND');
+          }
+        }
+
+        // 4. Fetch tenant tax rate basis points
+        const client = await pool.connect();
+        let taxBasisPoints = 1800; // Default 18% GST
+        let receiptNumber = '';
+        try {
+          const tenantRes = await client.query<{ tax_rate_basis_points: number }>(
+            'SELECT tax_rate_basis_points FROM tenants WHERE id = $1;',
+            [gymId]
+          );
+          if (tenantRes.rows.length > 0 && tenantRes.rows[0].tax_rate_basis_points != null) {
+            taxBasisPoints = Number(tenantRes.rows[0].tax_rate_basis_points);
+          }
+
+          // 5. Generate monotonic tax invoice / receipt number (REC-YYYYMM-000001)
+          await client.query("SELECT set_config('app.gym_id', $1, true);", [gymId]);
+          const receiptRes = await client.query<{ generate_next_receipt_number: string }>(
+            'SELECT generate_next_receipt_number($1) as generate_next_receipt_number;',
+            [gymId]
+          );
+          receiptNumber = receiptRes.rows[0]?.generate_next_receipt_number || `REC-${Date.now()}`;
+        } finally {
+          client.release();
+        }
+
+        // Calculate inclusive tax cents: amount * taxRate / (10000 + taxRate)
+        const taxCents = taxBasisPoints > 0
+          ? Math.round((amountCents * taxBasisPoints) / (10000 + taxBasisPoints))
+          : 0;
+
+        // 6. Insert into append-only payment_transactions ledger
+        const [inserted] = await tx
+          .insert(paymentTransactions)
+          .values({
+            gymId,
+            memberId,
+            subscriptionId: subscriptionId || null,
+            idempotencyKey,
+            receiptNumber,
+            type: 'payment',
+            method,
+            amountCents: BigInt(amountCents),
+            taxCents: BigInt(taxCents),
+            currency: 'INR',
+            effectiveDate: sql`CURRENT_DATE`,
+            externalReference: externalReference || null,
+            notes: notes || null,
+            recordedByUserId: tenantContext.userId
+          })
+          .returning();
+
+        return { isReplay: false, transaction: inserted };
+      });
+
+      const statusCode = payment.isReplay ? 200 : 201;
+      return reply.status(statusCode).send({ payment: payment.transaction, isReplay: payment.isReplay });
+    } catch (err: unknown) {
+      if ((err as Error).message === 'MEMBER_NOT_FOUND') {
+        return reply.status(404).send({ error: 'Member not found in this gym' });
+      }
+      if ((err as Error).message === 'SUBSCRIPTION_NOT_FOUND') {
+        return reply.status(404).send({ error: 'Subscription not found for this member' });
+      }
+      throw err;
+    }
+  });
+
+  // 19. GET SINGLE PAYMENT RECEIPT
+  fastify.get<{
+    Params: { gymId: string; paymentId: string };
+  }>('/:gymId/payments/:paymentId', { preHandler: [authenticateUser, requireTenant] }, async (req, reply) => {
+    const { gymId, paymentId } = req.params;
+    const tenantContext = req.tenantContext!;
+
+    const payment = await withTenantContext(pool, tenantContext, async (tx) => {
+      const [row] = await tx
+        .select({
+          id: paymentTransactions.id,
+          gymId: paymentTransactions.gymId,
+          memberId: paymentTransactions.memberId,
+          subscriptionId: paymentTransactions.subscriptionId,
+          receiptNumber: paymentTransactions.receiptNumber,
+          type: paymentTransactions.type,
+          method: paymentTransactions.method,
+          amountCents: paymentTransactions.amountCents,
+          taxCents: paymentTransactions.taxCents,
+          currency: paymentTransactions.currency,
+          effectiveDate: paymentTransactions.effectiveDate,
+          externalReference: paymentTransactions.externalReference,
+          parentTransactionId: paymentTransactions.parentTransactionId,
+          notes: paymentTransactions.notes,
+          recordedByUserId: paymentTransactions.recordedByUserId,
+          createdAt: paymentTransactions.createdAt,
+          memberFirstName: members.firstName,
+          memberLastName: members.lastName,
+          memberNumber: members.memberNumber,
+          memberPhone: members.phone,
+          memberEmail: members.email
+        })
+        .from(paymentTransactions)
+        .leftJoin(members, and(eq(members.gymId, paymentTransactions.gymId), eq(members.id, paymentTransactions.memberId)))
+        .where(and(eq(paymentTransactions.gymId, gymId), eq(paymentTransactions.id, paymentId)));
+
+      return row || null;
+    });
+
+    if (!payment) {
+      return reply.status(404).send({ error: 'Payment transaction not found in this gym' });
+    }
+
+    return reply.send({ payment });
+  });
+
+  // 20. REFUND PAYMENT
+  fastify.post<{
+    Params: { gymId: string; paymentId: string };
+    Body: {
+      idempotencyKey: string;
+      amountCents: number;
+      method?: 'cash' | 'upi' | 'card_pos' | 'bank_transfer';
+      notes?: string | null;
+    };
+  }>('/:gymId/payments/:paymentId/refund', { preHandler: [authenticateUser, requireTenant] }, async (req, reply) => {
+    const { gymId, paymentId } = req.params;
+    const tenantContext = req.tenantContext!;
+
+    // RBAC: only owner or manager can issue refunds
+    if (tenantContext.role !== 'owner' && tenantContext.role !== 'manager') {
+      return reply.status(403).send({ error: 'Forbidden: Only owners and managers can issue refunds' });
+    }
+
+    const parseResult = RefundRecordSchema.safeParse(req.body);
+    if (!parseResult.success) {
+      return reply.status(400).send({
+        error: 'Validation failed',
+        issues: parseResult.error.format()
+      });
+    }
+
+    const { idempotencyKey, amountCents, method, cancelSubscription, notes } = parseResult.data;
+
+    try {
+      const refundResult = await withTenantContext(pool, tenantContext, async (tx) => {
+        // Idempotency check
+        const [existing] = await tx
+          .select()
+          .from(paymentTransactions)
+          .where(and(eq(paymentTransactions.gymId, gymId), eq(paymentTransactions.idempotencyKey, idempotencyKey)));
+
+        if (existing) {
+          return { isReplay: true, transaction: existing };
+        }
+
+        // Fetch parent payment transaction
+        const [parent] = await tx
+          .select()
+          .from(paymentTransactions)
+          .where(and(eq(paymentTransactions.gymId, gymId), eq(paymentTransactions.id, paymentId)));
+
+        if (!parent) {
+          throw new Error('PARENT_NOT_FOUND');
+        }
+
+        if (parent.type !== 'payment') {
+          throw new Error('PARENT_NOT_A_PAYMENT');
+        }
+
+        // If requested or required, cancel linked subscription to satisfy refund semantics
+        if (cancelSubscription && parent.subscriptionId) {
+          await tx
+            .update(subscriptions)
+            .set({ status: 'cancelled' })
+            .where(and(eq(subscriptions.gymId, gymId), eq(subscriptions.id, parent.subscriptionId)));
+        }
+
+        // Generate receipt number for refund
+        const client = await pool.connect();
+        let refundReceiptNumber = '';
+        try {
+          await client.query("SELECT set_config('app.gym_id', $1, true);", [gymId]);
+          const receiptRes = await client.query<{ generate_next_receipt_number: string }>(
+            'SELECT generate_next_receipt_number($1) as generate_next_receipt_number;',
+            [gymId]
+          );
+          refundReceiptNumber = (receiptRes.rows[0]?.generate_next_receipt_number || `REC-${Date.now()}`) + '-REF';
+        } finally {
+          client.release();
+        }
+
+        // Insert refund into payment_transactions (will trigger trg_payment_refund_limit & trg_payment_refund_semantics in PG)
+        // Ledger requirement: refunds must have amountCents < 0 per check_payment_type_amount_sign constraint
+        const [insertedRefund] = await tx
+          .insert(paymentTransactions)
+          .values({
+            gymId,
+            memberId: parent.memberId,
+            subscriptionId: parent.subscriptionId,
+            idempotencyKey,
+            receiptNumber: refundReceiptNumber,
+            type: 'refund',
+            method: method || parent.method,
+            amountCents: -BigInt(Math.abs(amountCents)),
+            taxCents: BigInt(0),
+            currency: 'INR',
+            effectiveDate: sql`CURRENT_DATE`,
+            parentTransactionId: parent.id,
+            notes: notes || `Refund for receipt ${parent.receiptNumber || parent.id}`,
+            recordedByUserId: tenantContext.userId
+          })
+          .returning();
+
+        return { isReplay: false, transaction: insertedRefund };
+      });
+
+      const statusCode = refundResult.isReplay ? 200 : 201;
+      return reply.status(statusCode).send({ refund: refundResult.transaction, isReplay: refundResult.isReplay });
+    } catch (err: unknown) {
+      if ((err as Error).message === 'PARENT_NOT_FOUND') {
+        return reply.status(404).send({ error: 'Original payment transaction not found in this gym' });
+      }
+      if ((err as Error).message === 'PARENT_NOT_A_PAYMENT') {
+        return reply.status(400).send({ error: 'Cannot issue a refund for a non-payment transaction' });
+      }
+
+      // Check for PostgreSQL trigger rejection (e.g. refund exceeds original payment)
+      const rawMsg = (err as any)?.cause?.message || (err as Error)?.message || '';
+      if (rawMsg.includes('exceed') || rawMsg.includes('validate_refund_limit') || rawMsg.includes('Refund amount')) {
+        return reply.status(409).send({ error: rawMsg || 'Refund amount exceeds maximum refundable limit for this payment' });
+      }
+      if (rawMsg.includes('validate_subscription_refund_semantics') || rawMsg.includes('Invalid refund semantics')) {
+        return reply.status(409).send({ error: rawMsg || 'Subscription status prohibits direct refund without adjustment' });
+      }
+
+      throw err;
+    }
+  });
+
+  // 21. MEMBER FINANCIAL SUMMARY & STATEMENT
+  fastify.get<{
+    Params: { gymId: string; memberId: string };
+  }>('/:gymId/members/:memberId/financials', { preHandler: [authenticateUser, requireTenant] }, async (req, reply) => {
+    const { gymId, memberId } = req.params;
+    const tenantContext = req.tenantContext!;
+
+    const financialData = await withTenantContext(pool, tenantContext, async (tx) => {
+      // 1. Verify member exists
+      const [member] = await tx
+        .select({ id: members.id, firstName: members.firstName, lastName: members.lastName, memberNumber: members.memberNumber })
+        .from(members)
+        .where(and(eq(members.gymId, gymId), eq(members.id, memberId), isNull(members.deletedAt)));
+
+      if (!member) {
+        return null;
+      }
+
+      // 2. Fetch all payment ledger transactions
+      const txRows = await tx
+        .select()
+        .from(paymentTransactions)
+        .where(and(eq(paymentTransactions.gymId, gymId), eq(paymentTransactions.memberId, memberId)))
+        .orderBy(desc(paymentTransactions.createdAt));
+
+      // 3. Fetch all member subscriptions
+      const subRows = await tx
+        .select({
+          id: subscriptions.id,
+          totalPriceCents: subscriptions.totalPriceCents,
+          discountCents: subscriptions.discountCents,
+          status: subscriptions.status
+        })
+        .from(subscriptions)
+        .where(and(eq(subscriptions.gymId, gymId), eq(subscriptions.memberId, memberId)));
+
+      let totalPaidCents = 0;
+      let totalRefundedCents = 0;
+
+      for (const t of txRows) {
+        const amt = Number(t.amountCents);
+        if (t.type === 'payment' || t.type === 'opening_balance') {
+          totalPaidCents += Math.abs(amt);
+        } else if (t.type === 'refund' || t.type === 'reversal') {
+          totalRefundedCents += Math.abs(amt);
+        }
+      }
+
+      const netPaidCents = totalPaidCents - totalRefundedCents;
+
+      // Total billed from non-cancelled subscriptions
+      let totalBilledCents = 0;
+      for (const s of subRows) {
+        if (s.status !== 'cancelled') {
+          const price = Number(s.totalPriceCents) - Number(s.discountCents);
+          totalBilledCents += Math.max(price, 0);
+        }
+      }
+
+      const balanceCents = totalBilledCents - netPaidCents;
+
+      return {
+        member,
+        summary: {
+          totalPaidCents,
+          totalRefundedCents,
+          netPaidCents,
+          totalBilledCents,
+          balanceCents,
+          isDuesPending: balanceCents > 0
+        },
+        transactions: txRows
+      };
+    });
+
+    if (!financialData) {
+      return reply.status(404).send({ error: 'Member not found in this gym' });
+    }
+
+    return reply.send(financialData);
   });
 };
