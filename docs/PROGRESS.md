@@ -41,15 +41,23 @@
   - Dedicated Plans page (`/plans`) and Member Subscriptions management modal (`data-testid="subscriptions-modal"`).
   - Multi-tenant tenant-switch authentication flow and full Playwright E2E journey.
 
+- [x] **Phase 3 Slice 3: Payments Ledger, Receipts & Invoicing (PR E - Ready for Review)**
+  - Built append-only payment transactions ledger (`payment_transactions`) rejecting `UPDATE` and `DELETE`.
+  - Implemented monotonic monthly tax receipt numbering (`REC-YYYYMM-000001`) via PostgreSQL sequence/definer function.
+  - Supported inclusive 18% GST calculation, UPI, Cash, Card POS, and Bank Transfer payment modes with idempotency keys.
+  - Guarded partial and full refunds with 2-key advisory transaction locking, subscription cancellation semantics (`cancelSubscription: true`), and database trigger over-refund guards.
+  - Delivered member financial ledger statement API (`GET /api/gyms/:gymId/members/:memberId/financials`).
+  - Added Payments & Invoicing web UI (`/payments`), tax receipt / refund voucher view modals, and full Playwright E2E journey.
+
 ## In Progress
-- [ ] **Phase 3 Slice 3: Payments & Invoicing (Ledger Integration)**
-  - Record payment transactions (`payment_transactions`) for subscriptions.
-  - Generate sequential tax receipts (`REC-YYYYMM-000001`).
-  - Track balances, partial payments, and overdue accounts.
+- [ ] **Phase 3 Slice 4: Attendance Tracking**
+  - Daily check-in / check-out with active subscription verification.
+  - Partial unique index enforcement preventing multiple active check-ins per day.
+  - Manual voiding / re-checkin controls.
+  - Real-time attendance log web view and Playwright journey.
 
 ## Blocked
 - None.
 
 ## Next Up
-- Phase 3 Slice 4: Attendance Tracking (Check-in / Check-out, QR scan, manual voiding).
-- Phase 3 Slice 5: CSV Member Importer with transactional batching.
+- Phase 3 Slice 5: CSV Member Importer with transactional batching and validation.
