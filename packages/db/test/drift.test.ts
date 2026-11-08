@@ -39,7 +39,7 @@ describe('Database Schema Drift Verification (Types, Nullability, Defaults)', ()
     await pool.end();
   });
 
-  it('verifies zero drift across all 18 tables, 162 columns, types, nullability, and defaults', async () => {
+  it('verifies zero drift across all public tables, columns, types, nullability, and defaults', async () => {
     // 1. Fetch all public tables from pg_tables
     const tablesRes = await pool.query<{ table_name: string }>(`
       SELECT tablename as table_name

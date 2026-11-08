@@ -31,6 +31,13 @@ export function buildApp(customPoolOrOptions?: pg.Pool | BuildAppOptions) {
     logger: process.env.NODE_ENV !== 'test'
   });
 
+  app.setErrorHandler((error, request, reply) => {
+    if (process.env.NODE_ENV === 'test' && (!reply.statusCode || reply.statusCode >= 500)) {
+      console.error(`[FASTIFY ERROR] ${request.method} ${request.url} failed with:`, error);
+    }
+    reply.send(error);
+  });
+
   if (onRoute) {
     app.addHook('onRoute', onRoute);
   }

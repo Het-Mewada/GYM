@@ -49,3 +49,8 @@
 - **Decision**: Privileged operations executed via `SECURITY DEFINER` database procedures enforce role authorization inside the database function itself. Functions like `void_attendance_record` query `user_gym_memberships` for `(gym_id, NULLIF(current_setting('app.user_id', true), '')::uuid)` and explicitly require `role IN ('owner', 'manager')`, raising an exception if unauthorized (`staff` or unlinked callers).
 - **Consequences**: Provides single-source-of-truth authorization directly at the data boundary. The database role `app_user` cannot perform administrative mutations even if the calling application layer fails to check permissions.
 
+## ADR-010: Database-Backed Login Throttling & Closed Open Registration for Pilot
+- **Context**: In-memory login rate limiters lose counter state upon process restart and fail across distributed horizontally-scaled API replicas. Furthermore, overly aggressive per-IP throttlers lock out busy shared front-desk gym routers. Finally, open self-registration invites spam and unverified account creation during early pilots.
+- **Decision**: Persist login attempt counters in the PostgreSQL database in `account_login_attempts`, accessed strictly via SECURITY DEFINER functions (`auth_record_failed_login`, `auth_is_account_locked`, `auth_clear_account_lockout`). Configure per-IP throttling generously (300 req / 15 min) while enforcing strict 5-attempt / 5-minute per-account lockouts. Close public registration (`POST /api/auth/register` returns 403 Forbidden) and require onboarding via platform provisioning or staff invite claims.
+- **Consequences**: Zero loss of throttling counters during restarts/deployments, immunity from shared IP counter lockouts, and reduced attack surface during pilot operations.
+

@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync, FastifyRequest, FastifyReply } from 'fastify';
 import type pg from 'pg';
 import crypto from 'node:crypto';
-import { hashPassword, verifyPassword, generateRandomToken, hashToken } from './crypto.js';
+import { hashPassword, verifyPassword, generateRandomToken, hashToken, DUMMY_ARGON2_HASH } from './crypto.js';
 import { signAccessToken } from './jwt.js';
 
 interface AuthPluginOptions {
@@ -9,54 +9,49 @@ interface AuthPluginOptions {
 }
 
 // -----------------------------------------------------------------------------
-// Per-Account Login Throttling (In addition to per-IP rate limiting)
+// Database-Backed Per-Account Login Throttling (In addition to per-IP rate limiting)
+// State lives in PostgreSQL account_login_attempts table via SECURITY DEFINER functions.
 // -----------------------------------------------------------------------------
-interface AccountThrottleState {
-  attempts: number;
-  lockedUntil?: number;
-}
-
-const accountLoginAttempts = new Map<string, AccountThrottleState>();
 export const ACCOUNT_MAX_FAILED_ATTEMPTS = 5;
 export const ACCOUNT_LOCKOUT_MS = 5 * 60 * 1000; // 5 minutes
 
-export function resetAccountThrottler(): void {
-  accountLoginAttempts.clear();
+export async function recordFailedLogin(pool: pg.Pool, accountKey: string): Promise<{ isLocked: boolean; remainingLockMs?: number }> {
+  const res = await pool.query<{
+    out_failed_attempts: number;
+    out_is_locked: boolean;
+    out_remaining_seconds: number;
+  }>(
+    'SELECT * FROM auth_record_failed_login($1, $2, $3);',
+    [accountKey, ACCOUNT_MAX_FAILED_ATTEMPTS, Math.floor(ACCOUNT_LOCKOUT_MS / 1000)]
+  );
+  const row = res.rows[0];
+  return {
+    isLocked: row?.out_is_locked || false,
+    remainingLockMs: (row?.out_remaining_seconds || 0) * 1000
+  };
 }
 
-export function recordFailedLogin(accountKey: string): { isLocked: boolean; remainingLockMs?: number } {
-  const now = Date.now();
-  const state = accountLoginAttempts.get(accountKey) || { attempts: 0 };
-
-  state.attempts += 1;
-  if (state.attempts >= ACCOUNT_MAX_FAILED_ATTEMPTS) {
-    state.lockedUntil = now + ACCOUNT_LOCKOUT_MS;
-    accountLoginAttempts.set(accountKey, state);
-    return { isLocked: true, remainingLockMs: ACCOUNT_LOCKOUT_MS };
-  }
-
-  accountLoginAttempts.set(accountKey, state);
-  return { isLocked: false };
+export async function isAccountLocked(pool: pg.Pool, accountKey: string): Promise<{ isLocked: boolean; remainingLockMs?: number }> {
+  const res = await pool.query<{
+    out_is_locked: boolean;
+    out_remaining_seconds: number;
+  }>(
+    'SELECT * FROM auth_is_account_locked($1);',
+    [accountKey]
+  );
+  const row = res.rows[0];
+  return {
+    isLocked: row?.out_is_locked || false,
+    remainingLockMs: (row?.out_remaining_seconds || 0) * 1000
+  };
 }
 
-export function isAccountLocked(accountKey: string): { isLocked: boolean; remainingLockMs?: number } {
-  const now = Date.now();
-  const state = accountLoginAttempts.get(accountKey);
-  if (!state || !state.lockedUntil) {
-    return { isLocked: false };
-  }
-
-  if (now < state.lockedUntil) {
-    return { isLocked: true, remainingLockMs: state.lockedUntil - now };
-  }
-
-  // Lockout expired
-  accountLoginAttempts.delete(accountKey);
-  return { isLocked: false };
+export async function clearAccountLockout(pool: pg.Pool, accountKey: string): Promise<void> {
+  await pool.query('SELECT auth_clear_account_lockout($1);', [accountKey]);
 }
 
-export function clearAccountLockout(accountKey: string): void {
-  accountLoginAttempts.delete(accountKey);
+export async function resetAccountThrottler(pool: pg.Pool): Promise<void> {
+  await pool.query('SELECT auth_reset_account_throttler();');
 }
 
 // -----------------------------------------------------------------------------
@@ -65,38 +60,18 @@ export function clearAccountLockout(accountKey: string): void {
 export const REFRESH_GRACE_WINDOW_MS = 10_000; // 10 seconds grace window
 
 export const authRoutes: FastifyPluginAsync<AuthPluginOptions> = async (fastify, { pool }) => {
-  // 1. REGISTER
-  fastify.post('/register', async (req: FastifyRequest<{
-    Body: { phone: string; password: string; fullName: string; email?: string }
-  }>, reply: FastifyReply) => {
-    const { phone, password, fullName, email } = req.body;
-    if (!phone || !password || !fullName) {
-      return reply.status(400).send({ error: 'Missing required fields: phone, password, fullName' });
-    }
-
-    try {
-      const passwordHash = await hashPassword(password);
-      const res = await pool.query<{ auth_register_user: string }>(
-        'SELECT auth_register_user($1, $2, $3, $4) as auth_register_user;',
-        [phone, passwordHash, fullName, email || null]
-      );
-      const userId = res.rows[0].auth_register_user;
-      return reply.status(201).send({ userId, message: 'User registered successfully' });
-    } catch (err: unknown) {
-      const dbErr = err as { code?: string };
-      if (dbErr.code === '23505') { // unique violation
-        return reply.status(409).send({ error: 'Phone number already registered' });
-      }
-      fastify.log.error(err);
-      return reply.status(500).send({ error: 'Registration failed' });
-    }
+  // 1. REGISTER (Closed for pilot - invite or admin provisioned only)
+  fastify.post('/register', async (_req, reply: FastifyReply) => {
+    return reply.status(403).send({
+      error: 'Registration is invite-only for the pilot. Contact your gym administrator or claim a staff invitation.'
+    });
   });
 
-  // 2. LOGIN (Strict rate limit + per-account throttling)
+  // 2. LOGIN (Per-IP generous limit to protect shared front-desk gym counters + strict DB per-account throttling)
   fastify.post('/login', {
     config: {
       rateLimit: {
-        max: 10,
+        max: 300,
         timeWindow: '15 minutes'
       }
     }
@@ -108,8 +83,8 @@ export const authRoutes: FastifyPluginAsync<AuthPluginOptions> = async (fastify,
       return reply.status(400).send({ error: 'Phone and password are required' });
     }
 
-    // Check account lockout
-    const lockCheck = isAccountLocked(phone);
+    // Check database account lockout
+    const lockCheck = await isAccountLocked(pool, phone);
     if (lockCheck.isLocked) {
       return reply.status(429).send({
         error: 'Too many failed login attempts for this account. Please try again in 5 minutes.'
@@ -125,29 +100,24 @@ export const authRoutes: FastifyPluginAsync<AuthPluginOptions> = async (fastify,
     }>('SELECT * FROM auth_lookup_user_by_phone($1);', [phone]);
 
     const user = userRes.rows[0];
-    if (!user) {
-      const lockRes = recordFailedLogin(phone);
+
+    // Dummy hash for unknown users: executes the exact same Argon2id cryptographic workload (~70ms)
+    // to prevent timing side-channel user enumeration attacks.
+    const hashToVerify = user?.out_password_hash || DUMMY_ARGON2_HASH;
+    const isValid = await verifyPassword(hashToVerify, password);
+
+    if (!user || !isValid) {
+      const lockRes = await recordFailedLogin(pool, phone);
       if (lockRes.isLocked) {
         return reply.status(429).send({
           error: 'Too many failed login attempts for this account. Please try again in 5 minutes.'
         });
       }
-      return reply.status(401).send({ error: 'Invalid phone or password' });
+      return reply.status(401).send({ error: 'Invalid phone number or password' });
     }
 
-    const isValid = await verifyPassword(user.out_password_hash, password);
-    if (!isValid) {
-      const lockRes = recordFailedLogin(phone);
-      if (lockRes.isLocked) {
-        return reply.status(429).send({
-          error: 'Too many failed login attempts for this account. Please try again in 5 minutes.'
-        });
-      }
-      return reply.status(401).send({ error: 'Invalid phone or password' });
-    }
-
-    // Success -> Clear failed login state
-    clearAccountLockout(phone);
+    // Success -> Clear failed login state in database
+    await clearAccountLockout(pool, phone);
 
     // Read user's memberships under app.user_id context
     const client = await pool.connect();

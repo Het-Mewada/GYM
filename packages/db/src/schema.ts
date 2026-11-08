@@ -77,6 +77,14 @@ export const passwordResets = pgTable('password_resets', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
 });
 
+// 5b. account_login_attempts
+export const accountLoginAttempts = pgTable('account_login_attempts', {
+  accountKey: varchar('account_key', { length: 50 }).primaryKey(),
+  failedAttempts: integer('failed_attempts').default(1).notNull(),
+  lastAttemptAt: timestamp('last_attempt_at', { withTimezone: true }).defaultNow().notNull(),
+  lockedUntil: timestamp('locked_until', { withTimezone: true })
+});
+
 // 6. membership_plans
 export const membershipPlans = pgTable('membership_plans', {
   id: uuid('id').defaultRandom().primaryKey(),
@@ -330,6 +338,9 @@ export type NewStaffInvitation = typeof staffInvitations.$inferInsert;
 
 export type PasswordReset = typeof passwordResets.$inferSelect;
 export type NewPasswordReset = typeof passwordResets.$inferInsert;
+
+export type AccountLoginAttempt = typeof accountLoginAttempts.$inferSelect;
+export type NewAccountLoginAttempt = typeof accountLoginAttempts.$inferInsert;
 
 export type MembershipPlan = typeof membershipPlans.$inferSelect;
 export type NewMembershipPlan = typeof membershipPlans.$inferInsert;

@@ -13,7 +13,7 @@ This document outlines the security architecture, threat model, boundaries, and 
    - Concurrent subscription purchases or status transitions creating overlapping active subscription periods for the same member.
    - Concurrent receipt number generation causing duplicate numbers or numbering gaps.
 3. **Data Tampering & Ledger Invariants**:
-   - Unauthorized modifications or deletions of immutable financial records (`payments`, `subscription_adjustments`, `attendance_logs`, `audit_logs`).
+   - Unauthorized modifications or deletions of immutable financial records (`payment_transactions`, `subscription_adjustments`, `attendance_logs`, `audit_logs`).
    - Unauthorized escalation of role memberships (e.g. non-owners attempting to claim owner status or alter permissions).
 4. **Credential Leakage**:
    - Accidental exposure of Argon2id password hashes or refresh token hashes via broad `SELECT * FROM users` queries.
@@ -56,7 +56,7 @@ SELECT set_config('app.user_id', $2, true);
 ### Table & Column Privilege Boundaries
 To ensure defense-in-depth:
 - Direct `SELECT` on sensitive columns in `users` (`password_hash`) and `refresh_tokens` is revoked from `app_user`. All authentication lookups are routed through dedicated `SECURITY DEFINER` functions (`auth_lookup_user_by_phone`, `auth_complete_password_reset`).
-- Direct `UPDATE` and `DELETE` on financial tables (`payments`, `subscription_adjustments`), audit logs (`audit_logs`), and check-in logs (`attendance_logs`) are revoked from `app_user`. Immutability triggers enforce database-level rejection.
+- Direct `UPDATE` and `DELETE` on financial tables (`payment_transactions`, `subscription_adjustments`), audit logs (`audit_logs`), and check-in logs (`attendance_logs`) are revoked from `app_user`. Immutability triggers enforce database-level rejection. Any administrative check-in cancellation must route through the `void_attendance_record` procedure, which enforces owner/manager authorization directly at the database layer.
 
 ---
 
@@ -65,7 +65,7 @@ To ensure defense-in-depth:
 ### 1. Gap-Free Per-Gym Receipt Sequences
 Receipt numbers take the format `REC-YYYYMM-XXXXXX` (e.g., `REC-202611-000001`).
 - The `receipt_sequences` table is keyed by `gym_id` (`PRIMARY KEY (gym_id)`).
-- When a receipt is generated, `generate_receipt_number()` locks the gym's counter row using `SELECT next_receipt_number ... FOR UPDATE`.
+- When a receipt is generated, `generate_next_receipt_number(UUID)` locks the gym's counter row using `SELECT next_receipt_number ... FOR UPDATE`.
 - **Why Gym 1 and Gym 2 both receive `REC-202611-000001`**:
   Receipt sequence counters are isolated per gym tenant. Gym 1's counter begins at 1, and Gym 2's counter begins at 1. Neither gym can see, lock, or exhaust the receipt numbers of another gym. This prevents cross-tenant lock contention and guarantees independent, gap-free audit numbering per legal entity.
 
@@ -74,7 +74,7 @@ Receipt numbers take the format `REC-YYYYMM-XXXXXX` (e.g., `REC-202611-000001`).
 - **Subscriptions**: Guarded by `pg_advisory_xact_lock(hashtext('member_subscription'), hashtext(member_id::text))`. Concurrent subscription creations or transitions are serialized, preventing overlapping active periods.
 
 ### 3. Subscription Freeze & Trigger Depth
-When a subscription with a queued renewal is frozen, `apply_subscription_freeze_shift()` shifts the renewal start and end dates forward by the freeze duration.
+When a subscription with a queued renewal is frozen, trigger `trg_subscription_freeze_shift` executes `fn_shift_queued_subscription_dates_on_freeze()` to shift the renewal start and end dates forward by the freeze duration.
 - To prevent false-positive overlap triggers during the atomic shift, the overlap validator inspects `pg_trigger_depth() > 1`.
 - This relies on PostgreSQL's internal C execution stack rather than session variables, eliminating race conditions across connection pool sessions.
 
@@ -124,29 +124,48 @@ The API supports zero-downtime key rotation through dual-secret verification:
 - **Grace Window**: A 10-second grace window (`REFRESH_GRACE_WINDOW_MS = 10_000`) is supported. If two legitimate requests from the same client (e.g. concurrent browser tabs) present the same token within 10 seconds of its rotation, the server returns the active session rather than invalidating the token family.
 - **Reuse Detection**: Any reuse attempt occurring after the 10-second grace window is treated as an active token theft attack; the entire token family (`family_id`) is revoked immediately, logging out all sessions.
 
-### Login Throttling (Per-IP & Per-Account)
-- **Per-IP Rate Limiting**: Maximum 10 login requests per 15 minutes per IP address.
-- **Per-Account Throttling**: Tracks consecutive failed login attempts per phone number. After 5 failed attempts, the specific account is locked out for 5 minutes (`429 Too Many Requests`), mitigating distributed botnet brute-force attacks across rotating proxies.
+### Database-Backed Login Throttling (Per-IP & Per-Account)
+- **Where Counters Live**: Throttling counters live directly in PostgreSQL in the dedicated `account_login_attempts` table, managed exclusively through SECURITY DEFINER database procedures: `auth_record_failed_login`, `auth_is_account_locked`, and `auth_clear_account_lockout`.
+  - **Durability & Multi-Node Safety**: Counters survive Fastify process restarts, deployments, and work seamlessly across multi-instance clustered API replicas without requiring an external Redis layer.
+  - **DAC Hardening**: Direct `SELECT`, `UPDATE`, and `DELETE` on `account_login_attempts` are strictly revoked from `app_user`.
+- **Per-IP Rate Limiting (Counter-Friendly)**:
+  - Generously configured at `max: 300` requests per 15 minutes per IP address (via `@fastify/rate-limit`).
+  - **Shared Gym IP Protection**: In commercial gym operations, front desk reception tablets, POS counters, manager laptops, and staff mobile devices frequently route outbound internet traffic through a single shared commercial NAT router IP. Aggressive per-IP limits (e.g. 5 failures / IP) would cause an entire gym counter to be locked out if one receptionist mistyped their password. The generous per-IP window prevents counter disruption while defending against high-velocity DDoS flooding.
+- **Strict Database Per-Account Throttling**:
+  - Tracks failed attempts per account phone number (`account_key`).
+  - After 5 consecutive failed attempts (`ACCOUNT_MAX_FAILED_ATTEMPTS = 5`), the specific account is locked for 5 minutes (`ACCOUNT_LOCKOUT_MS = 300_000` / `429 Too Many Requests`).
+- **The Lockout-DoS Tradeoff & Mitigations**:
+  - *The Threat*: Because lockouts are keyed by phone number, an adversary who knows a gym staff member's phone number could intentionally submit 5 erroneous login attempts to lock that staff member out (Account Lockout Denial of Service).
+  - *Mitigations*:
+    1. **Decaying Lockout Window**: Lockout duration is bounded to 5 minutes rather than permanent lockout or exponential backoff, allowing automatic recovery.
+    2. **Owner-Initiated Bypass**: Gym owners can immediately generate a password reset link for the affected staff member via `/api/gyms/:gymId/staff/:userId/reset-password` without waiting for the lockout to elapse.
+    3. **Post-Pilot Evolution**: Post-pilot production will introduce progressive CAPTCHA and SMS OTP challenges before triggering account lockout.
+- **Timing Attack & User Enumeration Protection (Argon2id Dummy Hash)**:
+  - Both known and unknown phone numbers return an identical HTTP 401 status and identical JSON body: `{"error": "Invalid phone number or password"}`.
+  - When an unregistered phone number attempts login, the authentication handler executes `verifyPassword(DUMMY_ARGON2_HASH, password)` against a precomputed 64 MiB Argon2id hash. Because both valid and invalid phone lookups execute the exact same ~70ms cryptographic hashing workload, side-channel timing analysis cannot distinguish whether a phone number is registered.
 
 ---
 
-## 6. Password Reset & The Unverified-Phone Threat Model
+## 6. Staff Password Reset, Closed Registration & The Unverified-Phone Threat Model
 
-### User Enumeration Protection
-- The public `POST /api/auth/password-reset/request` endpoint returns a uniform response regardless of whether the phone number is registered:
-  `"If an account exists for this phone number, a password reset instruction has been processed."`
-- Timing variations and error messages are normalized to prevent attackers from mapping registered users.
+### Closed Open Registration for Pilot
+- Public user registration (`POST /api/auth/register`) is closed for the pilot (returns `403 Forbidden`).
+- User accounts are exclusively created via:
+  1. Platform/Admin tenant provisioning (`provision_gym`), establishing the initial gym owner.
+  2. Single-use staff invitations (`POST /api/auth/invites/claim`), claimed with a secure invite token generated by an owner.
+- Walk-in gym members registered at the counter do NOT have online login credentials during the pilot, eliminating public member-facing credential compromise surfaces.
 
-### Owner-Initiated Reset Links for Phone-Only Users
-- Many gym facilities operate with phone-only staff and members who do not have email access.
-- Owners can generate a single-use 1-hour password reset link directly from the dashboard:
-  `POST /api/gyms/:gymId/members/:memberId/reset-password`
-- The owner can copy and send the link directly to the member via WhatsApp or SMS.
+### Owner-Initiated Staff Password Reset
+- For phone-only staff members, gym owners can generate a single-use 1-hour password reset link:
+  `POST /api/gyms/:gymId/staff/:userId/reset-password`
+- **Owner-Only Privilege**: Strictly restricted to caller with `role = 'owner'`. Staff or trainers cannot initiate password resets.
+- **Owner Immuntability Protection**: An owner cannot reset the password of another owner (returns `403 Forbidden: Owners cannot reset passwords of other owners`), preventing rogue or compromised co-owners from seizing sole control of account ownership.
+- The procedure is executed via the `auth_create_staff_password_reset` database procedure under tenant session verification (`app.gym_id` and `app.user_id`).
 
 ### The Unverified-Phone Threat Model
-- **The Risk**: In front-desk operations where staff members manually type phone numbers during walk-in registrations, a member's phone number may be mistyped. If an owner initiates a password reset to that incorrect phone number, or if an account is activated without verification, the holder of the wrong number could receive the link.
-- **Defenses & Mitigations**:
-  1. Reset tokens have a strict 1-hour expiration and are single-use.
-  2. Every reset link generation is recorded in the append-only `audit_logs` table with `actor_type = 'user'` and the owner's `user_id`.
-  3. When an account is claimed or reset, a notification is logged in `notification_logs`.
-  4. **Production Requirement**: For member self-service portals, mandatory SMS OTP phone verification must be completed during member onboarding before allowing self-service account access.
+- **The Threat**: Gym counter staff may mistype an employee or member's phone number during initial creation. If an owner initiates a password reset to an incorrectly entered phone number, an unintended third party holding that phone number could potentially claim the account.
+- **Defenses & Mitigations in Effect**:
+  1. **Audit Trail**: Every staff reset generation is permanently recorded in `audit_logs` with the initiating owner's user ID, gym ID, and timestamp.
+  2. **Short Token TTL**: Reset tokens expire in 1 hour and are single-use. Once redeemed or expired, subsequent use is rejected.
+  3. **Closed Member Surface**: Since members do not have online accounts during the pilot, member phone mistypes pose zero authentication takeover risk.
+  4. **Post-Pilot Requirement**: Prior to enabling member-facing online self-service, outbound SMS OTP verification will be required to verify phone ownership before account activation.

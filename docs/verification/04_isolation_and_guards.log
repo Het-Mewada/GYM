@@ -24,47 +24,47 @@ TRUNCATE TABLE
 DO
               set_config              
 --------------------------------------
- f07d318e-65bc-473e-a73c-047edc3a9fe3
+ 2c4da8b5-b3aa-4417-8126-8dd61bb11dcf
 (1 row)
 
               set_config              
 --------------------------------------
- 23568fed-d606-4ad6-ba56-3444c1025bc5
+ 1ac50481-70b1-46b7-acbb-84e391efae8f
 (1 row)
 
               set_config              
 --------------------------------------
- ae3497e9-bebd-4fed-9135-9c44d87185ac
+ ae829a17-27d4-487c-a858-d00e21b9f566
 (1 row)
 
               set_config              
 --------------------------------------
- 1ac126de-8015-4150-a153-673b165aa900
+ 597d8a89-8c48-41fb-bda7-53d48e3d7ddf
 (1 row)
 
               set_config              
 --------------------------------------
- f07d318e-65bc-473e-a73c-047edc3a9fe3
+ 2c4da8b5-b3aa-4417-8126-8dd61bb11dcf
 (1 row)
 
               set_config              
 --------------------------------------
- 23568fed-d606-4ad6-ba56-3444c1025bc5
+ 1ac50481-70b1-46b7-acbb-84e391efae8f
 (1 row)
 
               set_config              
 --------------------------------------
- 2b7dbfd8-42f6-4ac0-862e-adfc36e641dc
+ 255bb1e5-b303-441e-89ff-d9678d22a115
 (1 row)
 
               set_config              
 --------------------------------------
- ae3497e9-bebd-4fed-9135-9c44d87185ac
+ ae829a17-27d4-487c-a858-d00e21b9f566
 (1 row)
 
               set_config              
 --------------------------------------
- f07d318e-65bc-473e-a73c-047edc3a9fe3
+ 2c4da8b5-b3aa-4417-8126-8dd61bb11dcf
 (1 row)
 
  receipt_nov1_ist  
@@ -78,23 +78,23 @@ DO
 SET
               set_config              
 --------------------------------------
- ae3497e9-bebd-4fed-9135-9c44d87185ac
+ ae829a17-27d4-487c-a858-d00e21b9f566
 (1 row)
 
               set_config              
 --------------------------------------
- f07d318e-65bc-473e-a73c-047edc3a9fe3
+ 2c4da8b5-b3aa-4417-8126-8dd61bb11dcf
 (1 row)
 
 INSERT 0 1
               set_config              
 --------------------------------------
- 1ac126de-8015-4150-a153-673b165aa900
+ 597d8a89-8c48-41fb-bda7-53d48e3d7ddf
 (1 row)
 
               set_config              
 --------------------------------------
- 23568fed-d606-4ad6-ba56-3444c1025bc5
+ 1ac50481-70b1-46b7-acbb-84e391efae8f
 (1 row)
 
 INSERT 0 1
@@ -115,12 +115,12 @@ DO
 DO
               set_config              
 --------------------------------------
- ae3497e9-bebd-4fed-9135-9c44d87185ac
+ ae829a17-27d4-487c-a858-d00e21b9f566
 (1 row)
 
               set_config              
 --------------------------------------
- f07d318e-65bc-473e-a73c-047edc3a9fe3
+ 2c4da8b5-b3aa-4417-8126-8dd61bb11dcf
 (1 row)
 
 INSERT 0 1
@@ -132,13 +132,13 @@ INSERT 0 0
 
               set_config              
 --------------------------------------
- 2b7dbfd8-42f6-4ac0-862e-adfc36e641dc
+ 255bb1e5-b303-441e-89ff-d9678d22a115
 (1 row)
 
 DO
               set_config              
 --------------------------------------
- f07d318e-65bc-473e-a73c-047edc3a9fe3
+ 2c4da8b5-b3aa-4417-8126-8dd61bb11dcf
 (1 row)
 
  void_attendance_record 

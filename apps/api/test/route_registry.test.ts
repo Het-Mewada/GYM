@@ -67,12 +67,12 @@ const ROUTE_REGISTRY: RouteDeclaration[] = [
   },
   {
     method: 'POST',
-    url: '/api/gyms/:gymId/members/:memberId/reset-password',
+    url: '/api/gyms/:gymId/staff/:userId/reset-password',
     isTenantScoped: true,
     hasPathIsolationTest: true,
     hasBodyIsolationTest: true,
     hasResourceIdIsolationTest: true,
-    notes: 'Owner-initiated reset for member'
+    notes: 'Owner-initiated reset for staff user'
   }
 ];
 
@@ -87,6 +87,8 @@ describe('Route Registry & Cross-Tenant Isolation Enforcement', () => {
   let gymBId: string;
   let memberAId: string;
   let memberBId: string;
+  let staffAId: string;
+  let staffBId: string;
 
   beforeAll(async () => {
     pool = createPool();
@@ -151,6 +153,32 @@ describe('Route Registry & Cross-Tenant Isolation Enforcement', () => {
       payload: { firstName: 'Bob', phone: '+919222222222' }
     });
     memberBId = JSON.parse(memBRes.payload).member.id;
+
+    // Create Staff in Gym A and Staff in Gym B
+    const staffPhoneA = `+9177771${Date.now().toString().slice(-5)}`;
+    const staffPhoneB = `+9177772${Date.now().toString().slice(-5)}`;
+    const staffARes = await pool.query('SELECT auth_register_user($1, $2, $3);', [staffPhoneA, passHash, 'Staff A']);
+    const staffBRes = await pool.query('SELECT auth_register_user($1, $2, $3);', [staffPhoneB, passHash, 'Staff B']);
+    staffAId = staffARes.rows[0].auth_register_user;
+    staffBId = staffBRes.rows[0].auth_register_user;
+
+    const linkStaff = async (gId: string, uId: string) => {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query("SELECT set_config('app.gym_id', $1, true);", [gId]);
+        await client.query(
+          "INSERT INTO user_gym_memberships (gym_id, user_id, role, is_active) VALUES ($1, $2, 'staff', true);",
+          [gId, uId]
+        );
+        await client.query('COMMIT');
+      } finally {
+        client.release();
+      }
+    };
+
+    await linkStaff(gymAId, staffAId);
+    await linkStaff(gymBId, staffBId);
   });
 
   afterAll(async () => {
@@ -218,10 +246,10 @@ describe('Route Registry & Cross-Tenant Isolation Enforcement', () => {
     });
     expect(inviteRes.statusCode).toBe(403);
 
-    // 5. POST /api/gyms/:gymId/members/:memberId/reset-password
+    // 5. POST /api/gyms/:gymId/staff/:userId/reset-password
     const resetRes = await app.inject({
       method: 'POST',
-      url: `/api/gyms/${gymAId}/members/${memberAId}/reset-password`,
+      url: `/api/gyms/${gymAId}/staff/${staffAId}/reset-password`,
       headers: { authorization: `Bearer ${ownerBToken}` }
     });
     expect(resetRes.statusCode).toBe(403);
@@ -261,10 +289,10 @@ describe('Route Registry & Cross-Tenant Isolation Enforcement', () => {
     expect(getRes.statusCode).toBe(404);
     expect(JSON.parse(getRes.payload).error).toMatch(/not found in this gym/i);
 
-    // POST reset-password where member belongs to Gym B, but triggered under Gym A
+    // POST reset-password where staff belongs to Gym B, but triggered under Gym A
     const resetRes = await app.inject({
       method: 'POST',
-      url: `/api/gyms/${gymAId}/members/${memberBId}/reset-password`,
+      url: `/api/gyms/${gymAId}/staff/${staffBId}/reset-password`,
       headers: { authorization: `Bearer ${ownerAToken}` }
     });
     expect(resetRes.statusCode).toBe(404);

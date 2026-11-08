@@ -163,7 +163,7 @@ $healthLog | Tee-Object -FilePath "docs/verification/07_health_checks.log"
 Get-Content "docs/verification/07_health_checks.log" | Out-File -FilePath $masterLogPath -Append -Encoding utf8
 
 Log-Message "`n>>> STEP 10: Executing Vitest Test Suites (API, DB, Auth, Cross-Tenant, Drift, Concurrency, Route Registry, JWT)"
-pnpm run test | Tee-Object -FilePath "docs/verification/08_vitest_suites.log"
+pnpm exec turbo run test --force | Tee-Object -FilePath "docs/verification/08_vitest_suites.log"
 Get-Content "docs/verification/08_vitest_suites.log" | Out-File -FilePath $masterLogPath -Append -Encoding utf8
 Assert-CommandSuccess "Vitest test suites"
 

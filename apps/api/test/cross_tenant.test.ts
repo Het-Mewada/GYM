@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { buildApp } from '../src/app.js';
 import type { FastifyInstance } from 'fastify';
 import { createPool } from '@gym/db';
+import { hashPassword } from '../src/auth/crypto.js';
 import type pg from 'pg';
 
 describe('HTTP Cross-Tenant Security Suite (Path IDs & Body IDs)', () => {
@@ -26,13 +27,9 @@ describe('HTTP Cross-Tenant Security Suite (Path IDs & Body IDs)', () => {
     app = buildApp(pool);
     await app.ready();
 
-    // 1. Setup User 1 & Gym 1
-    const u1Reg = await app.inject({
-      method: 'POST',
-      url: '/api/auth/register',
-      payload: { phone: gym1Phone, password, fullName: 'Owner Gym 1' }
-    });
-    expect(u1Reg.statusCode).toBe(201);
+    // 1. Setup User 1 & Gym 1 (Direct DB registration for test fixture)
+    const passHash = await hashPassword(password);
+    await pool.query('SELECT auth_register_user($1, $2, $3);', [gym1Phone, passHash, 'Owner Gym 1']);
 
     const u1Login = await app.inject({
       method: 'POST',
@@ -60,13 +57,8 @@ describe('HTTP Cross-Tenant Security Suite (Path IDs & Body IDs)', () => {
     expect(m1Res.statusCode).toBe(201);
     gym1MemberId = m1Res.json().member.id;
 
-    // 2. Setup User 2 & Gym 2
-    const u2Reg = await app.inject({
-      method: 'POST',
-      url: '/api/auth/register',
-      payload: { phone: gym2Phone, password, fullName: 'Owner Gym 2' }
-    });
-    expect(u2Reg.statusCode).toBe(201);
+    // 2. Setup User 2 & Gym 2 (Direct DB registration for test fixture)
+    await pool.query('SELECT auth_register_user($1, $2, $3);', [gym2Phone, passHash, 'Owner Gym 2']);
 
     const u2Login = await app.inject({
       method: 'POST',

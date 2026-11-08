@@ -54,13 +54,15 @@ jobs:
 
       - name: Initialize Database Roles and Apply DDL v5
         run: |
-          PGPASSWORD=postgres_ci_password psql -h localhost -p 5432 -U postgres -d gym_saas_test -f docker/initdb/01-init-roles.sql
-          PGPASSWORD=postgres_ci_password psql -h localhost -p 5432 -U postgres -d gym_saas_test -f scripts/ddl_v5.sql
+          PGPASSWORD=postgres_ci_password psql -v ON_ERROR_STOP=1 -h localhost -p 5432 -U postgres -d gym_saas_test -f docker/initdb/01-init-roles.sql
+          PGPASSWORD=postgres_ci_password psql -v ON_ERROR_STOP=1 -h localhost -p 5432 -U postgres -d gym_saas_test -f scripts/ddl_v5.sql
 
       - name: Run Test Suites (HTTP Cross-Tenant, Auth, Concurrency, Catalog, Drift)
-        run: pnpm run test
+        run: pnpm exec turbo run test --force
         env:
           DATABASE_URL: postgres://app_user:dev_app_password_only@localhost:5432/gym_saas_test
+          JWT_SECRET: dev_jwt_secret_must_be_strong_and_32_characters_minimum
+          COOKIE_SECRET: dev_cookie_secret_at_least_32_characters_long
 
       - name: Build applications
         run: pnpm run build

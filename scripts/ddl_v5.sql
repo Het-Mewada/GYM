@@ -68,6 +68,13 @@ CREATE TABLE password_resets (
   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE account_login_attempts (
+  account_key VARCHAR(50) PRIMARY KEY,
+  failed_attempts INT NOT NULL DEFAULT 1,
+  last_attempt_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  locked_until TIMESTAMPTZ
+);
+
 -- refresh_tokens has gym_id and user_id, with user_id-keyed RLS
 CREATE TABLE refresh_tokens (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -758,6 +765,202 @@ END;
 $$;
 ALTER FUNCTION auth_request_password_reset OWNER TO definer_admin;
 
+-- Function 2c: Owner-Initiated Staff Password Reset (Owner only, cannot reset another owner)
+CREATE OR REPLACE FUNCTION auth_create_staff_password_reset(
+  p_owner_id UUID,
+  p_gym_id UUID,
+  p_target_user_id UUID,
+  p_token_hash VARCHAR,
+  p_expires_at TIMESTAMPTZ
+)
+RETURNS TABLE (
+  out_user_id UUID,
+  out_phone VARCHAR,
+  out_full_name VARCHAR
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_context_gym_id UUID;
+  v_context_user_id UUID;
+  v_caller_role VARCHAR;
+  v_target_role VARCHAR;
+  v_target_is_active BOOLEAN;
+  v_target_phone VARCHAR;
+  v_target_name VARCHAR;
+BEGIN
+  -- 1. Verify tenant & user session context
+  v_context_gym_id := NULLIF(current_setting('app.gym_id', true), '')::uuid;
+  v_context_user_id := NULLIF(current_setting('app.user_id', true), '')::uuid;
+
+  IF v_context_gym_id IS NULL OR v_context_gym_id != p_gym_id THEN
+    RAISE EXCEPTION 'Security context violation: app.gym_id does not match p_gym_id';
+  END IF;
+
+  IF v_context_user_id IS NULL OR v_context_user_id != p_owner_id THEN
+    RAISE EXCEPTION 'Security context violation: app.user_id does not match p_owner_id';
+  END IF;
+
+  -- 2. Caller must be an active owner of p_gym_id
+  SELECT role INTO v_caller_role
+  FROM user_gym_memberships
+  WHERE gym_id = p_gym_id AND user_id = p_owner_id AND is_active = true;
+
+  IF v_caller_role IS DISTINCT FROM 'owner' THEN
+    RAISE EXCEPTION 'Forbidden: Only gym owners can initiate staff password resets';
+  END IF;
+
+  -- 3. Target user cannot be the caller
+  IF p_target_user_id = p_owner_id THEN
+    RAISE EXCEPTION 'Invalid request: Cannot initiate owner reset via staff reset procedure';
+  END IF;
+
+  -- 4. Target user must be an active member of this gym
+  SELECT role, is_active INTO v_target_role, v_target_is_active
+  FROM user_gym_memberships
+  WHERE gym_id = p_gym_id AND user_id = p_target_user_id;
+
+  IF v_target_role IS NULL OR v_target_is_active = false THEN
+    RAISE EXCEPTION 'Not found: Target staff member is not active in this gym';
+  END IF;
+
+  -- 5. Target user CANNOT be another owner (requirement 3: "owner only, cannot reset another owner")
+  IF v_target_role = 'owner' THEN
+    RAISE EXCEPTION 'Forbidden: Owners cannot reset passwords of other owners';
+  END IF;
+
+  -- 6. Insert password reset record
+  INSERT INTO password_resets (user_id, token_hash, expires_at)
+  VALUES (p_target_user_id, p_token_hash, p_expires_at);
+
+  -- 7. Fetch user phone and name (safe projection, no password_hash)
+  SELECT phone, full_name INTO v_target_phone, v_target_name
+  FROM users
+  WHERE id = p_target_user_id;
+
+  RETURN QUERY SELECT p_target_user_id, v_target_phone, v_target_name;
+END;
+$$;
+ALTER FUNCTION auth_create_staff_password_reset OWNER TO definer_admin;
+
+-- Function 2d: Database-Backed Login Throttling (Per-Account Lockout Counter)
+CREATE OR REPLACE FUNCTION auth_record_failed_login(
+  p_phone VARCHAR,
+  p_max_attempts INT DEFAULT 5,
+  p_lockout_seconds INT DEFAULT 300
+)
+RETURNS TABLE (
+  out_failed_attempts INT,
+  out_is_locked BOOLEAN,
+  out_remaining_seconds INT
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_attempts INT := 1;
+  v_locked_until TIMESTAMPTZ := NULL;
+  v_is_locked BOOLEAN := false;
+  v_remaining INT := 0;
+  v_now TIMESTAMPTZ := CURRENT_TIMESTAMP;
+  v_rec RECORD;
+BEGIN
+  SELECT * INTO v_rec FROM account_login_attempts WHERE account_key = p_phone FOR UPDATE;
+
+  IF v_rec.account_key IS NOT NULL THEN
+    IF v_rec.locked_until IS NOT NULL AND v_rec.locked_until > v_now THEN
+      -- Already locked out
+      v_remaining := GREATEST(1, EXTRACT(EPOCH FROM (v_rec.locked_until - v_now))::int);
+      RETURN QUERY SELECT v_rec.failed_attempts, true, v_remaining;
+      RETURN;
+    ELSIF v_rec.locked_until IS NOT NULL AND v_rec.locked_until <= v_now THEN
+      -- Lockout expired: reset counter to 1
+      v_attempts := 1;
+      v_locked_until := NULL;
+      v_is_locked := false;
+    ELSE
+      -- Increment attempts
+      v_attempts := v_rec.failed_attempts + 1;
+      IF v_attempts >= p_max_attempts THEN
+        v_locked_until := v_now + (p_lockout_seconds || ' seconds')::interval;
+        v_is_locked := true;
+        v_remaining := p_lockout_seconds;
+      END IF;
+    END IF;
+
+    UPDATE account_login_attempts
+    SET failed_attempts = v_attempts,
+        last_attempt_at = v_now,
+        locked_until = v_locked_until
+    WHERE account_key = p_phone;
+  ELSE
+    -- First failure
+    IF p_max_attempts <= 1 THEN
+      v_locked_until := v_now + (p_lockout_seconds || ' seconds')::interval;
+      v_is_locked := true;
+      v_remaining := p_lockout_seconds;
+    END IF;
+
+    INSERT INTO account_login_attempts (account_key, failed_attempts, last_attempt_at, locked_until)
+    VALUES (p_phone, v_attempts, v_now, v_locked_until);
+  END IF;
+
+  RETURN QUERY SELECT v_attempts, v_is_locked, v_remaining;
+END;
+$$;
+ALTER FUNCTION auth_record_failed_login OWNER TO definer_admin;
+
+CREATE OR REPLACE FUNCTION auth_is_account_locked(p_phone VARCHAR)
+RETURNS TABLE (
+  out_is_locked BOOLEAN,
+  out_remaining_seconds INT
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_rec RECORD;
+  v_now TIMESTAMPTZ := CURRENT_TIMESTAMP;
+BEGIN
+  SELECT * INTO v_rec FROM account_login_attempts WHERE account_key = p_phone;
+
+  IF v_rec.account_key IS NOT NULL AND v_rec.locked_until IS NOT NULL AND v_rec.locked_until > v_now THEN
+    RETURN QUERY SELECT true, GREATEST(1, EXTRACT(EPOCH FROM (v_rec.locked_until - v_now))::int);
+  ELSE
+    RETURN QUERY SELECT false, 0;
+  END IF;
+END;
+$$;
+ALTER FUNCTION auth_is_account_locked OWNER TO definer_admin;
+
+CREATE OR REPLACE FUNCTION auth_clear_account_lockout(p_phone VARCHAR)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  DELETE FROM account_login_attempts WHERE account_key = p_phone;
+END;
+$$;
+ALTER FUNCTION auth_clear_account_lockout OWNER TO definer_admin;
+
+CREATE OR REPLACE FUNCTION auth_reset_account_throttler()
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  DELETE FROM account_login_attempts;
+END;
+$$;
+ALTER FUNCTION auth_reset_account_throttler OWNER TO definer_admin;
+
 -- Function 3: Provision Gym Tenant
 CREATE OR REPLACE FUNCTION provision_gym(
   p_owner_id UUID,
@@ -1072,6 +1275,11 @@ GRANT EXECUTE ON FUNCTION auth_register_user TO app_user;
 GRANT EXECUTE ON FUNCTION auth_lookup_user_by_phone TO app_user;
 GRANT EXECUTE ON FUNCTION auth_complete_password_reset TO app_user;
 GRANT EXECUTE ON FUNCTION auth_request_password_reset TO app_user;
+GRANT EXECUTE ON FUNCTION auth_create_staff_password_reset TO app_user;
+GRANT EXECUTE ON FUNCTION auth_record_failed_login TO app_user;
+GRANT EXECUTE ON FUNCTION auth_is_account_locked TO app_user;
+GRANT EXECUTE ON FUNCTION auth_clear_account_lockout TO app_user;
+GRANT EXECUTE ON FUNCTION auth_reset_account_throttler TO app_user;
 GRANT EXECUTE ON FUNCTION provision_gym TO app_user;
 GRANT EXECUTE ON FUNCTION update_tenant_settings TO app_user;
 GRANT EXECUTE ON FUNCTION get_tenant_settings TO app_user;
@@ -1079,3 +1287,7 @@ GRANT EXECUTE ON FUNCTION claim_staff_invitation TO app_user;
 GRANT EXECUTE ON FUNCTION generate_next_receipt_number(UUID) TO app_user;
 GRANT EXECUTE ON FUNCTION generate_next_member_number(UUID) TO app_user;
 GRANT EXECUTE ON FUNCTION void_attendance_record TO app_user;
+
+-- account_login_attempts table owned by definer_admin, revoked from app_user
+ALTER TABLE account_login_attempts OWNER TO definer_admin;
+REVOKE ALL ON account_login_attempts FROM PUBLIC, app_user;

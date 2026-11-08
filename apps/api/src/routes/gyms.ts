@@ -2,7 +2,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import type pg from 'pg';
 import { withTenantContext, members, eq, and } from '@gym/db';
 import { authenticateUser, createRequireTenantMembership } from '../middleware/auth.js';
-import { generateRandomToken, hashToken, hashPassword } from '../auth/crypto.js';
+import { generateRandomToken, hashToken } from '../auth/crypto.js';
 
 interface GymRoutesOptions {
   pool: pg.Pool;
@@ -151,67 +151,67 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
     });
   });
 
-  // 6. Owner-Initiated Password Reset for Phone-Only Users
+  // 6. Owner-Initiated Staff Password Reset (Owner only, cannot reset another owner)
   fastify.post<{
-    Params: { gymId: string; memberId: string };
+    Params: { gymId: string; userId: string };
     Body?: { gym_id?: string; gymId?: string };
-  }>('/:gymId/members/:memberId/reset-password', {
+  }>('/:gymId/staff/:userId/reset-password', {
     preHandler: [authenticateUser, requireTenant]
   }, async (req, reply) => {
-    const { gymId, userId, role: userRole } = req.tenantContext!;
-    const { memberId } = req.params;
+    const { gymId, userId: callerId, role: userRole } = req.tenantContext!;
+    const { userId: targetUserId } = req.params;
 
     if (userRole !== 'owner') {
-      return reply.status(403).send({ error: 'Only gym owners can initiate password resets for members' });
+      return reply.status(403).send({ error: 'Only gym owners can initiate staff password resets' });
     }
 
-    const result = await withTenantContext(pool, { gymId, userId }, async (db, client) => {
-      const rows = await db.select()
-        .from(members)
-        .where(and(eq(members.gymId, gymId), eq(members.id, memberId)));
-      const member = rows[0];
-      if (!member) {
-        return null;
-      }
+    if (callerId === targetUserId) {
+      return reply.status(400).send({ error: 'Cannot initiate owner reset via staff reset procedure' });
+    }
 
-      const rawToken = generateRandomToken(32);
-      const tokenHash = hashToken(rawToken);
-      const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+    const rawToken = generateRandomToken(32);
+    const tokenHash = hashToken(rawToken);
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
 
-      // Ensure a user account exists for this member's phone number
-      const userRes = await client.query<{ out_user_id: string }>(
-        'SELECT out_user_id FROM auth_lookup_user_by_phone($1);',
-        [member.phone]
-      );
-
-      if (!userRes.rows[0]) {
-        // Front-desk registered member who doesn't have an online user account yet
-        const tempPass = await hashPassword(generateRandomToken(16));
-        const fullName = `${member.firstName} ${member.lastName || ''}`.trim();
-        await client.query<{ auth_register_user: string }>(
-          'SELECT auth_register_user($1, $2, $3, $4) as auth_register_user;',
-          [member.phone, tempPass, fullName, member.email || null]
+    try {
+      const result = await withTenantContext(pool, { gymId, userId: callerId }, async (_db, client) => {
+        const res = await client.query<{
+          out_user_id: string;
+          out_phone: string;
+          out_full_name: string;
+        }>(
+          'SELECT * FROM auth_create_staff_password_reset($1, $2, $3, $4, $5);',
+          [callerId, gymId, targetUserId, tokenHash, expiresAt]
         );
+        const row = res.rows[0];
+        if (!row) {
+          return null;
+        }
+
+        return {
+          userId: row.out_user_id,
+          phone: row.out_phone,
+          fullName: row.out_full_name,
+          resetToken: rawToken,
+          resetUrl: `https://app.gymsaas.local/reset-password?token=${rawToken}`,
+          expiresAt: expiresAt.toISOString()
+        };
+      });
+
+      return reply.status(200).send(result);
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      if (errMsg.includes('Owners cannot reset passwords of other owners')) {
+        return reply.status(403).send({ error: 'Owners cannot reset passwords of other owners' });
       }
-
-      await client.query(
-        'SELECT auth_request_password_reset($1, $2, $3);',
-        [member.phone, tokenHash, expiresAt]
-      );
-
-      return {
-        memberId: member.id,
-        phone: member.phone,
-        resetToken: rawToken,
-        resetUrl: `https://app.gymsaas.local/reset-password?token=${rawToken}`,
-        expiresAt: expiresAt.toISOString()
-      };
-    });
-
-    if (!result) {
-      return reply.status(404).send({ error: 'Member not found in this gym' });
+      if (errMsg.includes('Target staff member is not active in this gym') || errMsg.includes('Not found')) {
+        return reply.status(404).send({ error: 'Staff member not found in this gym' });
+      }
+      if (errMsg.includes('Only gym owners can initiate staff password resets')) {
+        return reply.status(403).send({ error: 'Only gym owners can initiate staff password resets' });
+      }
+      fastify.log.error(err);
+      return reply.status(500).send({ error: 'Failed to initiate staff password reset' });
     }
-
-    return reply.status(200).send(result);
   });
 };

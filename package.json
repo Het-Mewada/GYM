@@ -6,8 +6,9 @@
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev",
-    "lint": "turbo run lint && node scripts/check_no_raw_sql_concatenation.mjs",
+    "lint": "turbo run lint && node scripts/check_no_raw_sql_concatenation.mjs && node scripts/check_docs_sync.mjs",
     "lint:security": "node scripts/check_no_raw_sql_concatenation.mjs",
+    "lint:docs": "node scripts/check_docs_sync.mjs",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
     "format": "prettier --write \"**/*.{ts,tsx,md,json}\""

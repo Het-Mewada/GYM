@@ -4,6 +4,7 @@ import type { FastifyInstance } from 'fastify';
 import { createPool } from '@gym/db';
 import type pg from 'pg';
 import { resetAccountThrottler } from '../src/auth/routes.js';
+import { hashPassword } from '../src/auth/crypto.js';
 
 describe('Auth & Session System', () => {
   let app: FastifyInstance;
@@ -16,42 +17,46 @@ describe('Auth & Session System', () => {
   let accessToken: string;
 
   beforeAll(async () => {
-    resetAccountThrottler();
     pool = createPool();
+    await resetAccountThrottler(pool);
     app = buildApp(pool);
     await app.ready();
+
+    // Direct DB registration for owner test fixture (pilot has open registration closed)
+    const passHash = await hashPassword(testPassword);
+    const regRes = await pool.query<{ auth_register_user: string }>(
+      'SELECT auth_register_user($1, $2, $3) as auth_register_user;',
+      [testPhone, passHash, 'Test Owner']
+    );
+    userId = regRes.rows[0].auth_register_user;
   });
 
   afterAll(async () => {
     await app.close();
   });
 
-  it('1. registers a new user with Argon2id password', async () => {
+  it('1. rejects open registration as invite-only for pilot', async () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/auth/register',
       payload: {
-        phone: testPhone,
+        phone: `+91988${Math.floor(1000000 + Math.random() * 9000000)}`,
         password: testPassword,
-        fullName: 'Test Owner'
+        fullName: 'Uninvited User'
       }
     });
 
-    expect(res.statusCode).toBe(201);
+    expect(res.statusCode).toBe(403);
     const body = res.json();
-    expect(body.userId).toBeDefined();
-    userId = body.userId;
+    expect(body.error).toContain('Registration is invite-only for the pilot');
   });
 
-  it('2. enforces per-account login throttling after 5 failed attempts', async () => {
+  it('2. enforces database-backed per-account login throttling after 5 failed attempts', async () => {
     const attackPhone = `+91989${Math.floor(1000000 + Math.random() * 9000000)}`;
 
-    // Register account to target
-    await app.inject({
-      method: 'POST',
-      url: '/api/auth/register',
-      payload: { phone: attackPhone, password: 'RealPassword123!', fullName: 'Target User' }
-    });
+    // Seed account in DB
+    const passHash = await hashPassword('RealPassword123!');
+    await pool.query('SELECT auth_register_user($1, $2, $3);', [attackPhone, passHash, 'Target User']);
 
     // 4 failed attempts should return 401
     for (let i = 0; i < 4; i++) {
@@ -71,6 +76,14 @@ describe('Auth & Session System', () => {
     });
     expect(lockRes.statusCode).toBe(429);
     expect(lockRes.json().error).toContain('Too many failed login attempts for this account');
+
+    // Verify counter lives in database via security definer check
+    const lockStatus = await pool.query<{ out_is_locked: boolean; out_remaining_seconds: number }>(
+      'SELECT * FROM auth_is_account_locked($1);',
+      [attackPhone]
+    );
+    expect(lockStatus.rows[0].out_is_locked).toBe(true);
+    expect(lockStatus.rows[0].out_remaining_seconds).toBeGreaterThan(0);
 
     // 6th attempt even with correct password is still rejected with 429
     const lockedValidRes = await app.inject({
@@ -190,7 +203,7 @@ describe('Auth & Session System', () => {
     expect(existingRes.json().message).toContain('If an account exists');
   });
 
-  it('6. allows owner-initiated password reset for phone-only member', async () => {
+  it('6. owner-initiated staff password reset (owner only, cannot reset another owner)', async () => {
     // Re-login to get fresh tokens
     const loginRes = await app.inject({
       method: 'POST',
@@ -208,37 +221,126 @@ describe('Auth & Session System', () => {
     });
     const gymId = gymRes.json().gymId;
 
-    // Create member with phone
-    const memberPhone = `+91777${Date.now().toString().slice(-7)}`;
-    const memberRes = await app.inject({
-      method: 'POST',
-      url: `/api/gyms/${gymId}/members`,
-      headers: { authorization: `Bearer ${ownerToken}` },
-      payload: { firstName: 'PhoneOnly', lastName: 'Member', phone: memberPhone }
-    });
-    const memberId = memberRes.json().member.id;
+    // Register a staff user in DB and link as staff in gym
+    const staffPhone = `+91771${Date.now().toString().slice(-7)}`;
+    const passHash = await hashPassword('OldStaffPass123!');
+    const staffUserRes = await pool.query<{ auth_register_user: string }>(
+      'SELECT auth_register_user($1, $2, $3) as auth_register_user;',
+      [staffPhone, passHash, 'Gym Staff']
+    );
+    const staffUserId = staffUserRes.rows[0].auth_register_user;
 
-    // Owner generates reset link
+    const linkUserToGym = async (gId: string, uId: string, role: string) => {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query("SELECT set_config('app.gym_id', $1, true);", [gId]);
+        await client.query(
+          "INSERT INTO user_gym_memberships (gym_id, user_id, role, is_active) VALUES ($1, $2, $3, true);",
+          [gId, uId, role]
+        );
+        await client.query('COMMIT');
+      } finally {
+        client.release();
+      }
+    };
+
+    await linkUserToGym(gymId, staffUserId, 'staff');
+
+    // Register another owner in DB and link as co-owner in gym
+    const coOwnerPhone = `+91772${Date.now().toString().slice(-7)}`;
+    const coOwnerRes = await pool.query<{ auth_register_user: string }>(
+      'SELECT auth_register_user($1, $2, $3) as auth_register_user;',
+      [coOwnerPhone, passHash, 'Co Owner']
+    );
+    const coOwnerUserId = coOwnerRes.rows[0].auth_register_user;
+
+    await linkUserToGym(gymId, coOwnerUserId, 'owner');
+
+    // 6a. Owner generates reset link for staff member (Must succeed)
     const resetGenRes = await app.inject({
       method: 'POST',
-      url: `/api/gyms/${gymId}/members/${memberId}/reset-password`,
+      url: `/api/gyms/${gymId}/staff/${staffUserId}/reset-password`,
       headers: { authorization: `Bearer ${ownerToken}` }
     });
     expect(resetGenRes.statusCode).toBe(200);
     const resetBody = resetGenRes.json();
+    expect(resetBody.userId).toBe(staffUserId);
     expect(resetBody.resetToken).toBeDefined();
     expect(resetBody.resetUrl).toContain(resetBody.resetToken);
 
-    // Complete password reset using the token
-    const newMemberPass = 'MemberPass1234!';
+    // 6b. Complete password reset using the token
+    const newStaffPass = 'NewStaffPass1234!';
     const compRes = await app.inject({
       method: 'POST',
       url: '/api/auth/password-reset/complete',
       payload: {
         token: resetBody.resetToken,
-        newPassword: newMemberPass
+        newPassword: newStaffPass
       }
     });
     expect(compRes.statusCode).toBe(200);
+
+    // Staff logs in with new password
+    const staffLoginRes = await app.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      payload: { phone: staffPhone, password: newStaffPass }
+    });
+    expect(staffLoginRes.statusCode).toBe(200);
+    const staffToken = staffLoginRes.json().accessToken;
+
+    // 6c. Owner CANNOT reset another owner (Must be rejected with 403)
+    const resetCoOwnerRes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymId}/staff/${coOwnerUserId}/reset-password`,
+      headers: { authorization: `Bearer ${ownerToken}` }
+    });
+    expect(resetCoOwnerRes.statusCode).toBe(403);
+    expect(resetCoOwnerRes.json().error).toContain('Owners cannot reset passwords of other owners');
+
+    // 6d. Non-owner (staff) CANNOT initiate reset for anyone (Must be rejected with 403)
+    const staffAttemptRes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymId}/staff/${staffUserId}/reset-password`,
+      headers: { authorization: `Bearer ${staffToken}` }
+    });
+    expect(staffAttemptRes.statusCode).toBe(403);
+    expect(staffAttemptRes.json().error).toContain('Only gym owners can initiate staff password resets');
+  });
+
+  it('7. login for unknown vs known phone returns identical status/body and comparable timing (dummy hash defense)', async () => {
+    const unknownPhone = `+91900${Math.floor(1000000 + Math.random() * 9000000)}`;
+
+    // Unknown phone attempt
+    const t0 = performance.now();
+    const resUnknown = await app.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      payload: { phone: unknownPhone, password: 'RandomPassword123!' }
+    });
+    const tUnknown = performance.now() - t0;
+
+    // Known phone with wrong password attempt
+    const t1 = performance.now();
+    const resKnown = await app.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      payload: { phone: testPhone, password: 'WrongPassword123!' }
+    });
+    const tKnown = performance.now() - t1;
+
+    // 1. Status codes must be identical 401
+    expect(resUnknown.statusCode).toBe(401);
+    expect(resKnown.statusCode).toBe(401);
+
+    // 2. Response body must be identical (no enumeration)
+    expect(resUnknown.json()).toEqual(resKnown.json());
+    expect(resUnknown.json()).toEqual({ error: 'Invalid phone number or password' });
+
+    // 3. Execution time: both must execute Argon2id computation
+    // Both take substantial CPU time due to Argon2id (64MB, 3 iterations)
+    expect(tUnknown).toBeGreaterThan(15);
+    expect(tKnown).toBeGreaterThan(15);
   });
 });

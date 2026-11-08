@@ -113,7 +113,7 @@ done
 } | tee docs/verification/07_health_checks.log | tee -a "$master_log"
 
 log "\n>>> STEP 10: Executing Vitest Test Suites (API, DB, Auth, Cross-Tenant, Drift, Concurrency, Route Registry, JWT)"
-pnpm run test | tee docs/verification/08_vitest_suites.log | tee -a "$master_log"
+pnpm exec turbo run test --force | tee docs/verification/08_vitest_suites.log | tee -a "$master_log"
 
 log "\n>>> ALL VERIFICATION STEPS COMPLETED SUCCESSFULLY - EXIT CODE: 0"
 log "=== END OF RECREATE_AND_TEST RUN $(date -u +"%Y-%m-%dT%H:%M:%SZ") - EXIT CODE: 0 ==="
