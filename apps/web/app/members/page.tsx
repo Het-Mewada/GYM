@@ -2,24 +2,38 @@
 
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import Link from 'next/link';
-import { type Member, type CreateMemberInput, fetchMembers, createMember } from '../lib/api';
+import { useRouter } from 'next/navigation';
+import {
+  type Member,
+  type CreateMemberInput,
+  type UpdateMemberInput,
+  fetchMembers,
+  createMember,
+  updateMember
+} from '../lib/api';
 
 export default function MembersPage() {
+  const router = useRouter();
+  const [isCheckingAuth, setIsCheckingAuth] = useState<boolean>(true);
   const [gymId, setGymId] = useState<string>('');
+  const [gymName, setGymName] = useState<string | null>(null);
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [userName, setUserName] = useState<string | null>(null);
+  const [isSuperAdmin, setIsSuperAdmin] = useState<boolean>(false);
   const [members, setMembers] = useState<Member[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive'>('all');
-  const [isLoading, setIsLoading] = useState(false);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [isInitialLoadDone, setIsInitialLoadDone] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
-  // Modal State
+  // Add Member Modal State
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
-  // Form Fields
+  // Add Member Form Fields
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
   const [phone, setPhone] = useState('');
@@ -29,21 +43,67 @@ export default function MembersPage() {
   const [emergencyContactName, setEmergencyContactName] = useState('');
   const [emergencyContactPhone, setEmergencyContactPhone] = useState('');
 
-  // Check auth session on mount
+  // Edit Member Modal State
+  const [editingMember, setEditingMember] = useState<Member | null>(null);
+  const [isEditSubmitting, setIsEditSubmitting] = useState(false);
+  const [editFormError, setEditFormError] = useState<string | null>(null);
+
+  // Edit Member Form Fields
+  const [editFirstName, setEditFirstName] = useState('');
+  const [editLastName, setEditLastName] = useState('');
+  const [editPhone, setEditPhone] = useState('');
+  const [editEmail, setEditEmail] = useState('');
+  const [editGender, setEditGender] = useState('unspecified');
+  const [editDateOfBirth, setEditDateOfBirth] = useState('');
+  const [editEmergencyContactName, setEditEmergencyContactName] = useState('');
+  const [editEmergencyContactPhone, setEditEmergencyContactPhone] = useState('');
+  const [editStatus, setEditStatus] = useState<'active' | 'inactive' | 'banned'>('active');
+
+  // Check auth session and fetch initial members immediately on mount
   useEffect(() => {
     if (typeof window !== 'undefined') {
       const token = localStorage.getItem('access_token');
-      const storedGymId = localStorage.getItem('gym_id');
-      const storedName = localStorage.getItem('user_name');
-      if (token) {
-        setIsAuthenticated(true);
-        if (storedName) setUserName(storedName);
-        if (storedGymId) setGymId(storedGymId);
-      } else {
+      if (!token) {
         setIsAuthenticated(false);
+        setIsCheckingAuth(false);
+        setIsLoading(false);
+        setIsInitialLoadDone(true);
+        return;
+      }
+
+      const storedGymId = localStorage.getItem('gym_id');
+      const storedGymName = localStorage.getItem('gym_name');
+      const storedName = localStorage.getItem('user_name');
+      const adminFlag = localStorage.getItem('is_platform_admin') === 'true';
+
+      setIsAuthenticated(true);
+      setIsSuperAdmin(adminFlag);
+      if (storedName) setUserName(storedName);
+      if (storedGymId) setGymId(storedGymId);
+      if (storedGymName) setGymName(storedGymName);
+      setIsCheckingAuth(false);
+
+      if (storedGymId) {
+        setIsLoading(true);
+        fetchMembers(storedGymId, {}, token)
+          .then((res) => {
+            if (res && Array.isArray(res.members)) {
+              setMembers(res.members);
+            }
+          })
+          .catch((err: unknown) => {
+            setError(err instanceof Error ? err.message : 'Failed to fetch members from server');
+          })
+          .finally(() => {
+            setIsLoading(false);
+            setIsInitialLoadDone(true);
+          });
+      } else {
+        setIsLoading(false);
+        setIsInitialLoadDone(true);
       }
     }
-  }, []);
+  }, [router]);
 
   // Fetch members from live backend only when authenticated
   const loadMembers = useCallback(async () => {
@@ -69,25 +129,31 @@ export default function MembersPage() {
     }
   }, [gymId, searchQuery, statusFilter]);
 
+  // Handle debounced search/filter changes after initial load is done
   useEffect(() => {
-    if (isAuthenticated && gymId) {
-      const timer = setTimeout(() => {
-        loadMembers();
-      }, 150);
-      return () => clearTimeout(timer);
-    }
-  }, [isAuthenticated, gymId, loadMembers]);
+    if (!isInitialLoadDone || !isAuthenticated || !gymId) return;
+
+    const timer = setTimeout(() => {
+      loadMembers();
+    }, 150);
+    return () => clearTimeout(timer);
+  }, [isInitialLoadDone, isAuthenticated, gymId, searchQuery, statusFilter, loadMembers]);
 
   const handleLogout = () => {
     if (typeof window !== 'undefined') {
       localStorage.removeItem('access_token');
       localStorage.removeItem('user_name');
       localStorage.removeItem('gym_id');
+      localStorage.removeItem('gym_name');
+      localStorage.removeItem('is_platform_admin');
     }
     setIsAuthenticated(false);
+    setIsSuperAdmin(false);
     setUserName(null);
     setGymId('');
+    setGymName(null);
     setMembers([]);
+    router.replace('/');
   };
 
   // Handle Form Submission
@@ -173,10 +239,119 @@ export default function MembersPage() {
       setEmergencyContactName('');
       setEmergencyContactPhone('');
       setIsModalOpen(false);
+      setSuccessMessage('Member enrolled successfully!');
     } catch (err: unknown) {
       setFormError(err instanceof Error ? err.message : 'Failed to create member');
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  useEffect(() => {
+    if (successMessage) {
+      const timer = setTimeout(() => {
+        setSuccessMessage(null);
+      }, 4000);
+      return () => clearTimeout(timer);
+    }
+  }, [successMessage]);
+
+  const handleOpenEditModal = (member: Member) => {
+    setEditingMember(member);
+    setEditFirstName(member.firstName);
+    setEditLastName(member.lastName || '');
+    setEditPhone(member.phone);
+    setEditEmail(member.email || '');
+    setEditGender(member.gender || 'unspecified');
+    setEditDateOfBirth(member.dateOfBirth ? member.dateOfBirth.split('T')[0] : '');
+    setEditEmergencyContactName(member.emergencyContactName || '');
+    setEditEmergencyContactPhone(member.emergencyContactPhone || '');
+    setEditStatus((member.status as 'active' | 'inactive' | 'banned') || 'active');
+    setEditFormError(null);
+  };
+
+  const handleCloseEditModal = () => {
+    setEditingMember(null);
+    setEditFormError(null);
+  };
+
+  const handleUpdateMember = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingMember) return;
+    setEditFormError(null);
+
+    if (!editFirstName.trim()) {
+      setEditFormError('First Name is required');
+      return;
+    }
+    if (!editPhone.trim()) {
+      setEditFormError('Phone number is required');
+      return;
+    }
+
+    // Client-side check for duplicate phone or email in this gym (excluding current member)
+    const duplicatePhone = members.find((m) => m.id !== editingMember.id && m.phone === editPhone.trim());
+    if (duplicatePhone) {
+      setEditFormError('A member with this phone number already exists in this gym');
+      return;
+    }
+    if (editEmail.trim()) {
+      const duplicateEmail = members.find(
+        (m) => m.id !== editingMember.id && m.email && m.email.toLowerCase() === editEmail.trim().toLowerCase()
+      );
+      if (duplicateEmail) {
+        setEditFormError('A member with this email already exists in this gym');
+        return;
+      }
+    }
+
+    setIsEditSubmitting(true);
+    try {
+      const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined;
+      const updatePayload: UpdateMemberInput = {
+        firstName: editFirstName.trim(),
+        lastName: editLastName.trim() ? editLastName.trim() : null,
+        phone: editPhone.trim(),
+        email: editEmail.trim() ? editEmail.trim() : null,
+        gender: editGender,
+        dateOfBirth: editDateOfBirth || null,
+        emergencyContactName: editEmergencyContactName.trim() ? editEmergencyContactName.trim() : null,
+        emergencyContactPhone: editEmergencyContactPhone.trim() ? editEmergencyContactPhone.trim() : null,
+        status: editStatus
+      };
+
+      if (isAuthenticated && gymId) {
+        const res = await updateMember(gymId, editingMember.id, updatePayload, token);
+        setMembers((prev) => prev.map((m) => (m.id === editingMember.id ? res.member : m)));
+      } else {
+        // Local preview mode
+        setMembers((prev) =>
+          prev.map((m) =>
+            m.id === editingMember.id
+              ? {
+                  ...m,
+                  firstName: updatePayload.firstName!,
+                  lastName: updatePayload.lastName || null,
+                  phone: updatePayload.phone!,
+                  email: updatePayload.email || null,
+                  gender: updatePayload.gender || 'unspecified',
+                  dateOfBirth: updatePayload.dateOfBirth || null,
+                  emergencyContactName: updatePayload.emergencyContactName || null,
+                  emergencyContactPhone: updatePayload.emergencyContactPhone || null,
+                  status: updatePayload.status || m.status,
+                  updatedAt: new Date().toISOString()
+                }
+              : m
+          )
+        );
+      }
+
+      setSuccessMessage(`Member ${editingMember.memberNumber} updated successfully!`);
+      setEditingMember(null);
+    } catch (err: unknown) {
+      setEditFormError(err instanceof Error ? err.message : 'Failed to update member');
+    } finally {
+      setIsEditSubmitting(false);
     }
   };
 
@@ -203,6 +378,15 @@ export default function MembersPage() {
     return members.filter((m) => m.status === 'active').length;
   }, [members]);
 
+  if (isCheckingAuth) {
+    return (
+      <div className="min-h-screen bg-neutral-950 flex flex-col items-center justify-center space-y-4">
+        <div className="w-8 h-8 rounded-full border-2 border-emerald-500 border-t-transparent animate-spin" />
+        <p className="text-xs text-neutral-400 font-medium">Loading members directory...</p>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-neutral-950 text-neutral-100 antialiased flex flex-col">
       {/* Top Navigation */}
@@ -218,8 +402,15 @@ export default function MembersPage() {
               </span>
             </Link>
             <span className="text-neutral-600">/</span>
-            <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-neutral-800 text-neutral-300 border border-neutral-700">
-              {isAuthenticated ? 'Tenanted Pod' : 'Unauthenticated'}
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-neutral-800 text-neutral-300 border border-neutral-700">
+              {gymName ? (
+                <>
+                  <span className="font-semibold text-emerald-400">{gymName}</span>
+                  {isSuperAdmin && <span className="text-[10px] text-neutral-400">• Super Admin Mode</span>}
+                </>
+              ) : (
+                'Tenanted Pod'
+              )}
             </span>
           </div>
 
@@ -231,6 +422,11 @@ export default function MembersPage() {
               <Link href="/members" className="text-emerald-400 font-semibold border-b-2 border-emerald-400 pb-1">
                 Members
               </Link>
+              {isSuperAdmin && (
+                <Link href="/platform/tenants" className="text-neutral-400 hover:text-neutral-100 transition">
+                  Super Admin
+                </Link>
+              )}
             </nav>
 
             <div className="flex items-center pl-4 border-l border-neutral-800">
@@ -262,20 +458,20 @@ export default function MembersPage() {
 
       {/* Main Content Area */}
       <main className="max-w-7xl mx-auto px-6 py-8 flex-1 w-full space-y-6">
-        {/* Unauthenticated Notice Banner */}
+        {/* Preview Mode Notice Banner */}
         {!isAuthenticated && (
-          <div data-testid="preview-mode-banner" className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 rounded-xl border border-neutral-800 bg-neutral-900/60 text-neutral-300 text-xs">
+          <div data-testid="preview-mode-banner" className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 rounded-xl border border-emerald-900/60 bg-emerald-950/20 text-emerald-200 text-xs">
             <div className="flex items-center gap-2.5">
-              <span className="flex h-2 w-2 rounded-full bg-amber-400 animate-pulse" />
+              <span className="flex h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
               <span>
-                <strong>Session Required:</strong> Sign in with your gym staff account to sync with the database.
+                <strong>Preview Mode:</strong> No authenticated gym session active. Sign in to sync member directory with cloud PostgreSQL database.
               </span>
             </div>
             <Link
               href="/login"
               className="inline-flex items-center justify-center px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-black font-semibold text-xs transition whitespace-nowrap"
             >
-              Sign In
+              Sign In to GymOS
             </Link>
           </div>
         )}
@@ -286,7 +482,14 @@ export default function MembersPage() {
             <h1 className="text-3xl font-bold tracking-tight text-white flex items-center gap-3">
               Members Directory
               <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-neutral-800 text-neutral-300 border border-neutral-700">
-                {members.length} Total
+                {!isInitialLoadDone ? (
+                  <span className="inline-flex items-center gap-1.5 text-neutral-400">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    Loading...
+                  </span>
+                ) : (
+                  `${members.length} Total`
+                )}
               </span>
             </h1>
             <p className="text-sm text-neutral-400 mt-1">
@@ -316,19 +519,41 @@ export default function MembersPage() {
           </div>
         )}
 
+        {/* Success Alert */}
+        {successMessage && (
+          <div
+            data-testid="success-banner"
+            className="p-3 rounded-lg bg-emerald-950/80 border border-emerald-800 text-emerald-300 text-xs font-medium flex items-center justify-between"
+          >
+            <span>{successMessage}</span>
+            <button
+              onClick={() => setSuccessMessage(null)}
+              className="text-emerald-400 hover:text-emerald-200 font-bold ml-2 cursor-pointer"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
         {/* Quick Stats Cards */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div className="border border-neutral-800/80 bg-neutral-900/40 p-4 rounded-xl">
             <div className="text-xs font-medium text-neutral-400 uppercase tracking-wider">Total Members</div>
-            <div className="text-2xl font-bold text-white mt-1">{members.length}</div>
+            <div className="text-2xl font-bold text-white mt-1">
+              {!isInitialLoadDone ? <span className="text-neutral-600 animate-pulse">—</span> : members.length}
+            </div>
           </div>
           <div className="border border-neutral-800/80 bg-neutral-900/40 p-4 rounded-xl">
             <div className="text-xs font-medium text-neutral-400 uppercase tracking-wider">Active Status</div>
-            <div className="text-2xl font-bold text-emerald-400 mt-1">{activeCount}</div>
+            <div className="text-2xl font-bold text-emerald-400 mt-1">
+              {!isInitialLoadDone ? <span className="text-neutral-600 animate-pulse">—</span> : activeCount}
+            </div>
           </div>
           <div className="border border-neutral-800/80 bg-neutral-900/40 p-4 rounded-xl">
             <div className="text-xs font-medium text-neutral-400 uppercase tracking-wider">Current Search Match</div>
-            <div className="text-2xl font-bold text-neutral-200 mt-1">{displayedMembers.length}</div>
+            <div className="text-2xl font-bold text-neutral-200 mt-1">
+              {!isInitialLoadDone ? <span className="text-neutral-600 animate-pulse">—</span> : displayedMembers.length}
+            </div>
           </div>
         </div>
 
@@ -394,18 +619,22 @@ export default function MembersPage() {
                   <th scope="col" className="px-6 py-3.5">Email</th>
                   <th scope="col" className="px-6 py-3.5">Status</th>
                   <th scope="col" className="px-6 py-3.5">Joined Date</th>
+                  <th scope="col" className="px-6 py-3.5 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-neutral-800/60">
-                {isLoading ? (
+                {(isLoading || !isInitialLoadDone) ? (
                   <tr>
-                    <td colSpan={6} className="px-6 py-12 text-center text-neutral-500">
-                      Loading members directory...
+                    <td colSpan={7} className="px-6 py-16 text-center" data-testid="loading-state">
+                      <div className="flex flex-col items-center justify-center space-y-3">
+                        <div className="w-8 h-8 rounded-full border-2 border-emerald-500 border-t-transparent animate-spin" />
+                        <p className="text-xs font-medium text-neutral-400">Loading members directory...</p>
+                      </div>
                     </td>
                   </tr>
                 ) : displayedMembers.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="px-6 py-16 text-center" data-testid="empty-state">
+                    <td colSpan={7} className="px-6 py-16 text-center" data-testid="empty-state">
                       <div className="flex flex-col items-center justify-center space-y-3">
                         <div className="w-12 h-12 rounded-full bg-neutral-900 border border-neutral-800 flex items-center justify-center text-neutral-500">
                           <svg className="w-6 h-6" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24">
@@ -454,14 +683,29 @@ export default function MembersPage() {
                           className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold ${
                             member.status === 'active'
                               ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800/80'
+                              : member.status === 'banned'
+                              ? 'bg-red-950/80 text-red-400 border border-red-800/80'
                               : 'bg-neutral-800 text-neutral-400 border border-neutral-700'
                           }`}
                         >
-                          {member.status === 'active' ? '● Active' : '○ Inactive'}
+                          {member.status === 'active' ? '● Active' : member.status === 'banned' ? '✕ Banned' : '○ Inactive'}
                         </span>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-xs text-neutral-400">
                         {member.joinedDate}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-right">
+                        <button
+                          type="button"
+                          data-testid={`edit-member-${member.id}`}
+                          onClick={() => handleOpenEditModal(member)}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border border-neutral-700 transition cursor-pointer"
+                        >
+                          <svg className="w-3.5 h-3.5 text-emerald-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
+                          </svg>
+                          Edit
+                        </button>
                       </td>
                     </tr>
                   ))
@@ -656,6 +900,219 @@ export default function MembersPage() {
                   className="px-4 py-2 rounded-lg text-sm font-semibold bg-emerald-500 hover:bg-emerald-400 text-black transition shadow-lg shadow-emerald-950/40 disabled:opacity-50 cursor-pointer"
                 >
                   {isSubmitting ? 'Saving...' : 'Save Member'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Member Modal */}
+      {editingMember && (
+        <div
+          data-testid="edit-member-modal"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm"
+        >
+          <div className="w-full max-w-lg bg-neutral-900 border border-neutral-800 rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            <div className="px-6 py-5 border-b border-neutral-800 flex items-center justify-between">
+              <div>
+                <div className="flex items-center gap-2">
+                  <h3 className="text-lg font-bold text-white">Edit Member</h3>
+                  <span className="font-mono text-xs font-semibold px-2 py-0.5 rounded bg-emerald-950/80 text-emerald-400 border border-emerald-800/80">
+                    {editingMember.memberNumber}
+                  </span>
+                </div>
+                <p className="text-xs text-neutral-400 mt-0.5">
+                  Update profile information, contact channels, and status for this member.
+                </p>
+              </div>
+              <button
+                type="button"
+                data-testid="close-edit-modal-button"
+                onClick={handleCloseEditModal}
+                className="text-neutral-400 hover:text-white p-1 rounded-lg hover:bg-neutral-800 transition cursor-pointer"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            <form data-testid="edit-member-form" onSubmit={handleUpdateMember} className="p-6 space-y-4">
+              {editFormError && (
+                <div
+                  data-testid="edit-form-error"
+                  className="p-3 rounded-lg bg-red-950/80 border border-red-800 text-red-200 text-xs font-medium"
+                >
+                  {editFormError}
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label htmlFor="edit-first-name-input" className="block text-xs font-semibold text-neutral-300 mb-1">
+                    First Name <span className="text-emerald-400">*</span>
+                  </label>
+                  <input
+                    id="edit-first-name-input"
+                    type="text"
+                    data-testid="edit-first-name-input"
+                    required
+                    value={editFirstName}
+                    onChange={(e) => setEditFirstName(e.target.value)}
+                    placeholder="e.g. Suresh"
+                    className="w-full px-3 py-2 rounded-lg bg-neutral-950 border border-neutral-800 text-sm text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+
+                <div>
+                  <label htmlFor="edit-last-name-input" className="block text-xs font-semibold text-neutral-300 mb-1">
+                    Last Name <span className="text-neutral-500 font-normal">(Optional)</span>
+                  </label>
+                  <input
+                    id="edit-last-name-input"
+                    type="text"
+                    data-testid="edit-last-name-input"
+                    value={editLastName}
+                    onChange={(e) => setEditLastName(e.target.value)}
+                    placeholder="e.g. Patel (or leave blank)"
+                    className="w-full px-3 py-2 rounded-lg bg-neutral-950 border border-neutral-800 text-sm text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label htmlFor="edit-phone-input" className="block text-xs font-semibold text-neutral-300 mb-1">
+                    Phone Number <span className="text-emerald-400">*</span>
+                  </label>
+                  <input
+                    id="edit-phone-input"
+                    type="tel"
+                    data-testid="edit-phone-input"
+                    required
+                    value={editPhone}
+                    onChange={(e) => setEditPhone(e.target.value)}
+                    placeholder="+919876543210"
+                    className="w-full px-3 py-2 rounded-lg bg-neutral-950 border border-neutral-800 text-sm font-mono text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+
+                <div>
+                  <label htmlFor="edit-email-input" className="block text-xs font-semibold text-neutral-300 mb-1">
+                    Email Address <span className="text-neutral-500 font-normal">(Optional)</span>
+                  </label>
+                  <input
+                    id="edit-email-input"
+                    type="email"
+                    data-testid="edit-email-input"
+                    value={editEmail}
+                    onChange={(e) => setEditEmail(e.target.value)}
+                    placeholder="member@example.com"
+                    className="w-full px-3 py-2 rounded-lg bg-neutral-950 border border-neutral-800 text-sm text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div>
+                  <label htmlFor="edit-status-select" className="block text-xs font-semibold text-neutral-300 mb-1">
+                    Status <span className="text-emerald-400">*</span>
+                  </label>
+                  <select
+                    id="edit-status-select"
+                    data-testid="edit-status-select"
+                    value={editStatus}
+                    onChange={(e) => setEditStatus(e.target.value as 'active' | 'inactive' | 'banned')}
+                    className="w-full px-3 py-2 rounded-lg bg-neutral-950 border border-neutral-800 text-sm text-neutral-200 focus:outline-none focus:border-emerald-500"
+                  >
+                    <option value="active">Active</option>
+                    <option value="inactive">Inactive</option>
+                    <option value="banned">Banned</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label htmlFor="edit-gender-select" className="block text-xs font-semibold text-neutral-300 mb-1">
+                    Gender
+                  </label>
+                  <select
+                    id="edit-gender-select"
+                    data-testid="edit-gender-select"
+                    value={editGender}
+                    onChange={(e) => setEditGender(e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg bg-neutral-950 border border-neutral-800 text-sm text-neutral-200 focus:outline-none focus:border-emerald-500"
+                  >
+                    <option value="unspecified">Unspecified</option>
+                    <option value="male">Male</option>
+                    <option value="female">Female</option>
+                    <option value="other">Other</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label htmlFor="edit-dob-input" className="block text-xs font-semibold text-neutral-300 mb-1">
+                    Date of Birth <span className="text-neutral-500 font-normal">(Optional)</span>
+                  </label>
+                  <input
+                    id="edit-dob-input"
+                    type="date"
+                    data-testid="edit-dob-input"
+                    value={editDateOfBirth}
+                    onChange={(e) => setEditDateOfBirth(e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg bg-neutral-950 border border-neutral-800 text-sm text-neutral-100 focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2 border-t border-neutral-800/80">
+                <div>
+                  <label htmlFor="edit-emergency-name-input" className="block text-xs font-semibold text-neutral-300 mb-1">
+                    Emergency Contact Name
+                  </label>
+                  <input
+                    id="edit-emergency-name-input"
+                    type="text"
+                    data-testid="edit-emergency-contact-name-input"
+                    value={editEmergencyContactName}
+                    onChange={(e) => setEditEmergencyContactName(e.target.value)}
+                    placeholder="Guardian or spouse"
+                    className="w-full px-3 py-2 rounded-lg bg-neutral-950 border border-neutral-800 text-sm text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+
+                <div>
+                  <label htmlFor="edit-emergency-phone-input" className="block text-xs font-semibold text-neutral-300 mb-1">
+                    Emergency Contact Phone
+                  </label>
+                  <input
+                    id="edit-emergency-phone-input"
+                    type="tel"
+                    data-testid="edit-emergency-contact-phone-input"
+                    value={editEmergencyContactPhone}
+                    onChange={(e) => setEditEmergencyContactPhone(e.target.value)}
+                    placeholder="+91..."
+                    className="w-full px-3 py-2 rounded-lg bg-neutral-950 border border-neutral-800 text-sm font-mono text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+              </div>
+
+              <div className="pt-4 border-t border-neutral-800 flex items-center justify-end gap-3">
+                <button
+                  type="button"
+                  data-testid="cancel-edit-button"
+                  onClick={handleCloseEditModal}
+                  className="px-4 py-2 rounded-lg text-sm font-medium text-neutral-400 hover:text-white hover:bg-neutral-800 transition cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  data-testid="save-edit-member-button"
+                  disabled={isEditSubmitting}
+                  className="px-4 py-2 rounded-lg text-sm font-semibold bg-emerald-500 hover:bg-emerald-400 text-black transition shadow-lg shadow-emerald-950/40 disabled:opacity-50 cursor-pointer"
+                >
+                  {isEditSubmitting ? 'Saving...' : 'Save Changes'}
                 </button>
               </div>
             </form>

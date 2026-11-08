@@ -133,3 +133,131 @@ export async function createMember(
 
   return res.json();
 }
+
+export interface UpdateMemberInput {
+  firstName?: string;
+  lastName?: string | null;
+  phone?: string;
+  email?: string | null;
+  gender?: string;
+  dateOfBirth?: string | null;
+  emergencyContactName?: string | null;
+  emergencyContactPhone?: string | null;
+  status?: 'active' | 'inactive' | 'banned';
+}
+
+export async function updateMember(
+  gymId: string,
+  memberId: string,
+  input: UpdateMemberInput,
+  token?: string
+): Promise<{ member: Member }> {
+  const activeToken = token || (typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined);
+
+  if (!activeToken) {
+    throw new Error('Authentication required');
+  }
+
+  const url = `${getApiBaseUrl()}/gyms/${gymId}/members/${memberId}`;
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${activeToken}`
+  };
+
+  const res = await fetch(url, {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify(input)
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(errorBody.error || `Failed to update member: ${res.statusText}`);
+  }
+
+  return res.json();
+}
+
+export interface CreateTenantInput {
+  name: string;
+  slug: string;
+  country?: string;
+  timezone?: string;
+  currency?: string;
+  taxRateBasisPoints?: number;
+  adminPhone: string;
+  adminFullName: string;
+  adminPassword: string;
+  adminEmail?: string;
+}
+
+export interface TenantListItem {
+  id: string;
+  name: string;
+  slug: string;
+  default_country: string;
+  timezone: string;
+  currency: string;
+  tax_rate_basis_points: number;
+  created_at: string;
+  admin_name: string | null;
+  admin_phone: string | null;
+  admin_email: string | null;
+}
+
+export async function fetchPlatformTenants(token?: string): Promise<{ tenants: TenantListItem[] }> {
+  const activeToken = token || (typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined);
+
+  if (!activeToken) {
+    throw new Error('Authentication required');
+  }
+
+  const url = `${getApiBaseUrl()}/gyms`;
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${activeToken}`
+  };
+
+  const res = await fetch(url, { headers });
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(errorBody.error || `Failed to fetch tenants: ${res.statusText}`);
+  }
+
+  return res.json();
+}
+
+export async function createTenantWithAdmin(
+  input: CreateTenantInput,
+  token?: string
+): Promise<{
+  gymId: string;
+  name: string;
+  slug: string;
+  adminUser: { id: string; fullName: string; phone: string; email: string | null };
+}> {
+  const activeToken = token || (typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined);
+
+  if (!activeToken) {
+    throw new Error('Authentication required');
+  }
+
+  const url = `${getApiBaseUrl()}/gyms`;
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${activeToken}`
+  };
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(input)
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(errorBody.error || `Failed to create tenant: ${res.statusText}`);
+  }
+
+  return res.json();
+}

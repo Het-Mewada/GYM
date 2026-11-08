@@ -50,6 +50,16 @@ export function createRequireTenantMembership(pool: pg.Pool) {
       });
     }
 
+    // Platform Super Admin Bypass / Global Oversight
+    if (req.user.isPlatformAdmin) {
+      req.tenantContext = {
+        gymId: routeGymId,
+        userId: req.user.userId,
+        role: 'owner'
+      };
+      return;
+    }
+
     // Check membership under app.user_id context
     const client = await pool.connect();
     try {

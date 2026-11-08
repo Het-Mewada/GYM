@@ -982,7 +982,10 @@ DECLARE
   v_session_user_id UUID;
 BEGIN
   v_session_user_id := NULLIF(current_setting('app.user_id', true), '')::uuid;
-  IF v_session_user_id IS NULL OR p_owner_id <> v_session_user_id THEN
+  IF v_session_user_id IS NULL OR (
+    p_owner_id <> v_session_user_id 
+    AND NOT EXISTS (SELECT 1 FROM users WHERE id = v_session_user_id AND is_platform_admin = true)
+  ) THEN
     RAISE EXCEPTION 'Access denied: p_owner_id does not match active session user.';
   END IF;
 
@@ -1004,6 +1007,74 @@ BEGIN
 END;
 $$;
 ALTER FUNCTION provision_gym OWNER TO definer_admin;
+
+-- Function 3b: Platform Super Admin List All Tenants
+CREATE OR REPLACE FUNCTION platform_list_all_tenants()
+RETURNS TABLE (
+  id UUID,
+  name VARCHAR(100),
+  slug VARCHAR(50),
+  default_country VARCHAR(2),
+  timezone VARCHAR(50),
+  currency VARCHAR(3),
+  tax_rate_basis_points BIGINT,
+  created_at TIMESTAMPTZ,
+  admin_name VARCHAR(100),
+  admin_phone VARCHAR(20),
+  admin_email VARCHAR(255)
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_session_user_id UUID;
+BEGIN
+  v_session_user_id := NULLIF(current_setting('app.user_id', true), '')::uuid;
+  IF v_session_user_id IS NULL OR NOT EXISTS (SELECT 1 FROM users WHERE users.id = v_session_user_id AND is_platform_admin = true) THEN
+    RAISE EXCEPTION 'Access denied: caller is not a platform admin.';
+  END IF;
+
+  RETURN QUERY
+  SELECT 
+    t.id, t.name, t.slug, t.default_country, t.timezone, t.currency, t.tax_rate_basis_points, t.created_at,
+    u.full_name as admin_name, u.phone as admin_phone, u.email as admin_email
+  FROM tenants t
+  LEFT JOIN LATERAL (
+    SELECT u2.full_name, u2.phone, u2.email
+    FROM user_gym_memberships ugm
+    JOIN users u2 ON u2.id = ugm.user_id
+    WHERE ugm.gym_id = t.id AND ugm.role = 'owner'
+    ORDER BY ugm.created_at ASC
+    LIMIT 1
+  ) u ON true
+  ORDER BY t.created_at DESC;
+END;
+$$;
+ALTER FUNCTION platform_list_all_tenants OWNER TO definer_admin;
+
+-- Function 3c: User List Assigned Tenants
+CREATE OR REPLACE FUNCTION get_user_tenants(p_user_id UUID)
+RETURNS TABLE (
+  id UUID,
+  name VARCHAR(100),
+  slug VARCHAR(50),
+  role VARCHAR(20)
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  RETURN QUERY
+  SELECT t.id, t.name, t.slug, ugm.role
+  FROM user_gym_memberships ugm
+  JOIN tenants t ON t.id = ugm.gym_id
+  WHERE ugm.user_id = p_user_id AND ugm.is_active = true
+  ORDER BY t.name ASC;
+END;
+$$;
+ALTER FUNCTION get_user_tenants OWNER TO definer_admin;
 
 -- Function 4: Update Tenant Settings (Validates p_gym_id equals app.gym_id + timezone check)
 CREATE OR REPLACE FUNCTION update_tenant_settings(
@@ -1294,6 +1365,8 @@ GRANT EXECUTE ON FUNCTION auth_is_account_locked TO app_user;
 GRANT EXECUTE ON FUNCTION auth_clear_account_lockout TO app_user;
 GRANT EXECUTE ON FUNCTION auth_reset_account_throttler TO app_user;
 GRANT EXECUTE ON FUNCTION provision_gym TO app_user;
+GRANT EXECUTE ON FUNCTION platform_list_all_tenants TO app_user;
+GRANT EXECUTE ON FUNCTION get_user_tenants TO app_user;
 GRANT EXECUTE ON FUNCTION update_tenant_settings TO app_user;
 GRANT EXECUTE ON FUNCTION get_tenant_settings TO app_user;
 GRANT EXECUTE ON FUNCTION claim_staff_invitation TO app_user;
@@ -1304,3 +1377,27 @@ GRANT EXECUTE ON FUNCTION void_attendance_record TO app_user;
 -- account_login_attempts table owned by definer_admin, revoked from app_user
 ALTER TABLE account_login_attempts OWNER TO definer_admin;
 REVOKE ALL ON account_login_attempts FROM PUBLIC, app_user;
+
+-- Seed Platform Super Admin
+DO $$
+DECLARE
+  v_admin_uid UUID;
+BEGIN
+  SELECT id INTO v_admin_uid FROM users WHERE phone = '+919999900000';
+  IF v_admin_uid IS NULL THEN
+    INSERT INTO users (phone, password_hash, full_name, email, is_platform_admin)
+    VALUES (
+      '+919999900000',
+      '$argon2id$v=19$m=65536,t=3,p=4$dQgKcEdL2DOdUZxIQspfIw$CSYOZojirOk7JIvjS5oLKv/34K947cvbHqftDMh3TRE',
+      'Super Admin',
+      'superadmin@gymsaas.local',
+      true
+    )
+    RETURNING id INTO v_admin_uid;
+  ELSE
+    UPDATE users
+    SET is_platform_admin = true,
+        password_hash = '$argon2id$v=19$m=65536,t=3,p=4$dQgKcEdL2DOdUZxIQspfIw$CSYOZojirOk7JIvjS5oLKv/34K947cvbHqftDMh3TRE'
+    WHERE id = v_admin_uid;
+  END IF;
+END $$;

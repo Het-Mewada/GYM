@@ -343,4 +343,100 @@ describe('Auth & Session System', () => {
     expect(tUnknown).toBeGreaterThan(15);
     expect(tKnown).toBeGreaterThan(15);
   });
+
+  it('8. Super Admin provisions a new tenant with initial admin user, and initial admin logs in successfully', async () => {
+    // 8a. Login as seeded Super Admin (+919999900000)
+    const superAdminPhone = '+919999900000';
+    const superAdminPass = 'Password123!';
+
+    const superLogin = await app.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      payload: { phone: superAdminPhone, password: superAdminPass }
+    });
+    expect(superLogin.statusCode).toBe(200);
+    const superToken = superLogin.json().accessToken;
+    expect(superLogin.json().user.isPlatformAdmin).toBe(true);
+
+    // 8b. Regular owner CANNOT provision a tenant with an adminPhone (must fail 403)
+    const unauthorizedAttempt = await app.inject({
+      method: 'POST',
+      url: '/api/gyms',
+      headers: { authorization: `Bearer ${accessToken}` },
+      payload: {
+        name: 'Unauthorized Gym',
+        slug: `unauth-gym-${Date.now()}`,
+        adminPhone: `+91981${Math.floor(1000000 + Math.random() * 9000000)}`,
+        adminFullName: 'Some Admin',
+        adminPassword: 'Password123!'
+      }
+    });
+    expect(unauthorizedAttempt.statusCode).toBe(403);
+    expect(unauthorizedAttempt.json().error).toContain('Only platform super administrators can provision tenants with an admin user');
+
+    // 8c. Super Admin provisions new tenant with initial admin
+    const newAdminPhone = `+91982${Math.floor(1000000 + Math.random() * 9000000)}`;
+    const newAdminPass = 'InitialAdminPass123!';
+    const newGymSlug = `sp-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+    const newAdminEmail = `owner-${Date.now()}-${Math.floor(Math.random() * 10000)}@superelite.com`;
+    const provisionRes = await app.inject({
+      method: 'POST',
+      url: '/api/gyms',
+      headers: { authorization: `Bearer ${superToken}` },
+      payload: {
+        name: 'Super Gym Elite',
+        slug: newGymSlug,
+        adminPhone: newAdminPhone,
+        adminFullName: 'Elite Gym Owner',
+        adminPassword: newAdminPass,
+        adminEmail: newAdminEmail
+      }
+    });
+
+    expect(provisionRes.statusCode).toBe(201);
+    const provisionBody = provisionRes.json();
+    expect(provisionBody.gymId).toBeDefined();
+    expect(provisionBody.name).toBe('Super Gym Elite');
+    expect(provisionBody.adminUser.phone).toBe(newAdminPhone);
+
+    // 8d. Newly created initial admin logs in and has 'owner' role in the new gym
+    const adminLogin = await app.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      payload: { phone: newAdminPhone, password: newAdminPass }
+    });
+    expect(adminLogin.statusCode).toBe(200);
+    const adminLoginBody = adminLogin.json();
+    expect(adminLoginBody.user.fullName).toBe('Elite Gym Owner');
+    expect(adminLoginBody.memberships).toHaveLength(1);
+    expect(adminLoginBody.memberships[0].gym_id).toBe(provisionBody.gymId);
+    expect(adminLoginBody.memberships[0].role).toBe('owner');
+
+    // 8e. Super Admin lists tenants via GET /api/gyms and sees newly provisioned tenant
+    const listRes = await app.inject({
+      method: 'GET',
+      url: '/api/gyms',
+      headers: { authorization: `Bearer ${superToken}` }
+    });
+    expect(listRes.statusCode).toBe(200);
+    const listedTenants = listRes.json().tenants;
+    const found = listedTenants.find((t: { slug: string }) => t.slug === newGymSlug);
+    expect(found).toBeDefined();
+    expect(found.admin_name).toBe('Elite Gym Owner');
+    expect(found.admin_phone).toBe(newAdminPhone);
+
+    // 8f. Super Admin can query members of the newly created tenant (God-Mode / Platform Oversight)
+    const membersRes = await app.inject({
+      method: 'GET',
+      url: `/api/gyms/${provisionBody.gymId}/members`,
+      headers: { authorization: `Bearer ${superToken}` }
+    });
+    expect(membersRes.statusCode).toBe(200);
+    const membersList = membersRes.json().members;
+    // Initial admin was automatically enrolled as member #1 in this gym's members list
+    expect(membersList).toHaveLength(1);
+    expect(membersList[0].phone).toBe(newAdminPhone);
+    expect(membersList[0].firstName).toBe('Elite');
+    expect(membersList[0].memberNumber).toBe('MEM-00001');
+  });
 });

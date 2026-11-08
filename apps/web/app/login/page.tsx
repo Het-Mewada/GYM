@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { loginUser } from '../lib/api';
@@ -12,6 +12,20 @@ export default function LoginPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const token = localStorage.getItem('access_token');
+      const isSuper = localStorage.getItem('is_platform_admin') === 'true';
+      if (token) {
+        if (isSuper) {
+          router.replace('/platform/tenants');
+        } else {
+          router.replace('/members');
+        }
+      }
+    }
+  }, [router]);
+
   const handleLogin = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setError(null);
@@ -22,11 +36,20 @@ export default function LoginPage() {
       if (typeof window !== 'undefined') {
         localStorage.setItem('access_token', res.accessToken);
         localStorage.setItem('user_name', res.user.fullName);
+        if (res.user.isPlatformAdmin) {
+          localStorage.setItem('is_platform_admin', 'true');
+        } else {
+          localStorage.removeItem('is_platform_admin');
+        }
         if (res.memberships && res.memberships.length > 0) {
           localStorage.setItem('gym_id', res.memberships[0].gym_id);
         }
       }
-      router.push('/members');
+      if (res.user.isPlatformAdmin) {
+        router.push('/platform/tenants');
+      } else {
+        router.push('/members');
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Login failed. Please check your credentials.');
     } finally {
@@ -93,7 +116,25 @@ export default function LoginPage() {
           </button>
         </form>
 
-        <div className="mt-6 text-center text-xs text-neutral-500">
+        <div className="mt-5 pt-4 border-t border-neutral-800">
+          <p className="text-[11px] text-neutral-400 text-center mb-2 font-medium">Quick Credentials for Testing</p>
+          <button
+            type="button"
+            onClick={() => {
+              setPhone('+919999900000');
+              setPassword('Password123!');
+            }}
+            className="w-full py-2 px-3 rounded-lg bg-neutral-950 hover:bg-neutral-800 border border-neutral-800 hover:border-neutral-700 text-xs text-neutral-300 flex items-center justify-between transition cursor-pointer"
+          >
+            <span className="font-semibold text-emerald-400 flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+              Super Admin (Platform)
+            </span>
+            <span className="font-mono text-[11px] text-neutral-400">+919999900000</span>
+          </button>
+        </div>
+
+        <div className="mt-5 text-center text-xs text-neutral-500">
           <Link href="/members" className="text-emerald-400 hover:underline">
             ← Back to Members Directory
           </Link>

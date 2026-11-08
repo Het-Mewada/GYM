@@ -30,6 +30,7 @@ const ROUTE_REGISTRY: RouteDeclaration[] = [
   { method: 'POST', url: '/api/auth/password-reset/request', isTenantScoped: false, notes: 'Password reset request' },
   { method: 'POST', url: '/api/auth/password-reset/complete', isTenantScoped: false, notes: 'Password reset completion' },
   { method: 'POST', url: '/api/gyms', isTenantScoped: false, notes: 'User-scoped gym provisioning' },
+  { method: 'GET', url: '/api/gyms', isTenantScoped: false, notes: 'List gyms (platform admin gets all; users get memberships)' },
 
   // 2. Tenant-Scoped Resource Routes (Must have isolation tests)
   {
@@ -56,6 +57,15 @@ const ROUTE_REGISTRY: RouteDeclaration[] = [
     hasBodyIsolationTest: false,
     hasResourceIdIsolationTest: true,
     notes: 'Get gym member by ID'
+  },
+  {
+    method: 'PATCH',
+    url: '/api/gyms/:gymId/members/:memberId',
+    isTenantScoped: true,
+    hasPathIsolationTest: true,
+    hasBodyIsolationTest: true,
+    hasResourceIdIsolationTest: true,
+    notes: 'Update gym member profile'
   },
   {
     method: 'POST',
@@ -237,6 +247,15 @@ describe('Route Registry & Cross-Tenant Isolation Enforcement', () => {
     });
     expect(getRes.statusCode).toBe(403);
 
+    // 3b. PATCH /api/gyms/:gymId/members/:memberId
+    const patchRes = await app.inject({
+      method: 'PATCH',
+      url: `/api/gyms/${gymAId}/members/${memberAId}`,
+      headers: { authorization: `Bearer ${ownerBToken}` },
+      payload: { firstName: 'Intruder Update' }
+    });
+    expect(patchRes.statusCode).toBe(403);
+
     // 4. POST /api/gyms/:gymId/staff/invites
     const inviteRes = await app.inject({
       method: 'POST',
@@ -276,6 +295,16 @@ describe('Route Registry & Cross-Tenant Isolation Enforcement', () => {
     });
     expect(inviteRes.statusCode).toBe(403);
     expect(JSON.parse(inviteRes.payload).error).toMatch(/Cross-tenant violation/i);
+
+    // PATCH /api/gyms/:gymId/members/:memberId with body gymId = gymBId
+    const patchBodyRes = await app.inject({
+      method: 'PATCH',
+      url: `/api/gyms/${gymAId}/members/${memberAId}`,
+      headers: { authorization: `Bearer ${ownerAToken}` },
+      payload: { firstName: 'Alice Patched', gymId: gymBId }
+    });
+    expect(patchBodyRes.statusCode).toBe(403);
+    expect(JSON.parse(patchBodyRes.payload).error).toMatch(/Cross-tenant violation/i);
   });
 
   // Verification of Resource-ID Cross-Tenant Isolation
@@ -288,6 +317,16 @@ describe('Route Registry & Cross-Tenant Isolation Enforcement', () => {
     });
     expect(getRes.statusCode).toBe(404);
     expect(JSON.parse(getRes.payload).error).toMatch(/not found in this gym/i);
+
+    // PATCH /api/gyms/:gymId/members/:memberId where member belongs to Gym B, but edited under Gym A
+    const patchResIdRes = await app.inject({
+      method: 'PATCH',
+      url: `/api/gyms/${gymAId}/members/${memberBId}`,
+      headers: { authorization: `Bearer ${ownerAToken}` },
+      payload: { firstName: 'Intruder Member B Update' }
+    });
+    expect(patchResIdRes.statusCode).toBe(404);
+    expect(JSON.parse(patchResIdRes.payload).error).toMatch(/not found in this gym/i);
 
     // POST reset-password where staff belongs to Gym B, but triggered under Gym A
     const resetRes = await app.inject({

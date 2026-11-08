@@ -268,4 +268,119 @@ describe('Members API: List, Create, and Search with Tenant Isolation', () => {
     expect(p2.json().total).toBe(2);
     expect(p2.json().members[0].id).not.toBe(p1.json().members[0].id);
   });
+
+  it('6. lets the owner edit a member in their gym', async () => {
+    // Fetch member 1 (Suresh) from Gym 1
+    const listRes = await app.inject({
+      method: 'GET',
+      url: `/api/gyms/${gym1Id}/members?q=Suresh`,
+      headers: { authorization: `Bearer ${gym1Token}` }
+    });
+    expect(listRes.statusCode).toBe(200);
+    const member = listRes.json().members[0];
+    expect(member).toBeDefined();
+
+    // Owner updates Suresh: add last name, update email, change status to inactive
+    const updateRes = await app.inject({
+      method: 'PATCH',
+      url: `/api/gyms/${gym1Id}/members/${member.id}`,
+      headers: { authorization: `Bearer ${gym1Token}` },
+      payload: {
+        firstName: 'Suresh Updated',
+        lastName: 'Raina',
+        phone: '+919811199999',
+        email: 'suresh.updated@example.com',
+        gender: 'male',
+        dateOfBirth: '1990-05-15',
+        emergencyContactName: 'Priyanka',
+        emergencyContactPhone: '+919811188888',
+        status: 'inactive'
+      }
+    });
+
+    expect(updateRes.statusCode).toBe(200);
+    const updatedMember = updateRes.json().member;
+    expect(updatedMember.firstName).toBe('Suresh Updated');
+    expect(updatedMember.lastName).toBe('Raina');
+    expect(updatedMember.phone).toBe('+919811199999');
+    expect(updatedMember.email).toBe('suresh.updated@example.com');
+    expect(updatedMember.gender).toBe('male');
+    expect(updatedMember.dateOfBirth).toBe('1990-05-15');
+    expect(updatedMember.emergencyContactName).toBe('Priyanka');
+    expect(updatedMember.emergencyContactPhone).toBe('+919811188888');
+    expect(updatedMember.status).toBe('inactive');
+
+    // Confirm GET returns updated details
+    const getRes = await app.inject({
+      method: 'GET',
+      url: `/api/gyms/${gym1Id}/members/${member.id}`,
+      headers: { authorization: `Bearer ${gym1Token}` }
+    });
+    expect(getRes.statusCode).toBe(200);
+    expect(getRes.json().member.firstName).toBe('Suresh Updated');
+    expect(getRes.json().member.status).toBe('inactive');
+  });
+
+  it('7. rejects updating member with duplicate phone in the same gym', async () => {
+    // Get member 1 and member 2 in Gym 1
+    const listRes = await app.inject({
+      method: 'GET',
+      url: `/api/gyms/${gym1Id}/members`,
+      headers: { authorization: `Bearer ${gym1Token}` }
+    });
+    const membersList = listRes.json().members;
+    expect(membersList.length).toBeGreaterThanOrEqual(2);
+    const [m1, m2] = membersList;
+
+    // Try to update m1's phone to m2's phone
+    const dupRes = await app.inject({
+      method: 'PATCH',
+      url: `/api/gyms/${gym1Id}/members/${m1.id}`,
+      headers: { authorization: `Bearer ${gym1Token}` },
+      payload: {
+        phone: m2.phone
+      }
+    });
+
+    expect(dupRes.statusCode).toBe(409);
+    expect(dupRes.json().error).toMatch(/already exists/i);
+  });
+
+  it('8. strictly enforces tenant isolation: owner cannot edit a member outside their gym', async () => {
+    // Fetch member from Gym 1
+    const listRes = await app.inject({
+      method: 'GET',
+      url: `/api/gyms/${gym1Id}/members`,
+      headers: { authorization: `Bearer ${gym1Token}` }
+    });
+    const gym1Member = listRes.json().members[0];
+
+    // Attempt 1: Gym 2 owner calls Gym 1's URL -> 403 Forbidden
+    const attack1 = await app.inject({
+      method: 'PATCH',
+      url: `/api/gyms/${gym1Id}/members/${gym1Member.id}`,
+      headers: { authorization: `Bearer ${gym2Token}` },
+      payload: { firstName: 'Hacked by Gym 2' }
+    });
+    expect(attack1.statusCode).toBe(403);
+
+    // Attempt 2: Gym 2 owner calls Gym 2's URL with Gym 1's member ID -> 404 Not Found in this gym
+    const attack2 = await app.inject({
+      method: 'PATCH',
+      url: `/api/gyms/${gym2Id}/members/${gym1Member.id}`,
+      headers: { authorization: `Bearer ${gym2Token}` },
+      payload: { firstName: 'Hacked by Gym 2' }
+    });
+    expect(attack2.statusCode).toBe(404);
+    expect(attack2.json().error).toMatch(/not found in this gym/i);
+
+    // Verify member in Gym 1 is untouched
+    const verifyRes = await app.inject({
+      method: 'GET',
+      url: `/api/gyms/${gym1Id}/members/${gym1Member.id}`,
+      headers: { authorization: `Bearer ${gym1Token}` }
+    });
+    expect(verifyRes.statusCode).toBe(200);
+    expect(verifyRes.json().member.firstName).toBe(gym1Member.firstName);
+  });
 });
