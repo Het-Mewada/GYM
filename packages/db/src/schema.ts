@@ -58,7 +58,7 @@ export const staffInvitations = pgTable('staff_invitations', {
   id: uuid('id').defaultRandom().primaryKey(),
   gymId: uuid('gym_id').notNull().references(() => tenants.id, { onDelete: 'cascade' }),
   tokenHash: varchar('token_hash', { length: 255 }).notNull().unique(),
-  role: varchar('role', { length: 20 }).notNull().default('staff'),
+  role: varchar('role', { length: 20 }).notNull(),
   createdByUserId: uuid('created_by_user_id').notNull().references(() => users.id),
   expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
   usedAt: timestamp('used_at', { withTimezone: true }),
@@ -126,7 +126,7 @@ export const subscriptions = pgTable('subscriptions', {
   gymId: uuid('gym_id').notNull().references(() => tenants.id, { onDelete: 'cascade' }),
   memberId: uuid('member_id').notNull(),
   planId: uuid('plan_id').notNull(),
-  status: varchar('status', { length: 20 }).notNull(), // 'pending' | 'active' | 'queued' | 'cancelled'
+  status: varchar('status', { length: 20 }).notNull().default('pending'), // 'pending' | 'active' | 'queued' | 'cancelled'
   startDate: date('start_date').notNull(),
   endDate: date('end_date').notNull(),
   totalPriceCents: bigint('total_price_cents', { mode: 'bigint' }).notNull(),
@@ -155,7 +155,7 @@ export const subscriptionFreezes = pgTable('subscription_freezes', {
   freezeEnd: date('freeze_end').notNull(),
   daysFrozen: integer('days_frozen').notNull(),
   reason: text('reason').notNull(),
-  approvedByUserId: uuid('approved_by_user_id').references(() => users.id),
+  approvedByUserId: uuid('approved_by_user_id').notNull().references(() => users.id),
   isActive: boolean('is_active').notNull().default(true),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
 }, (table) => [
@@ -232,7 +232,7 @@ export const attendanceLogs = pgTable('attendance_logs', {
   attendanceDate: date('attendance_date').notNull(),
   checkInTime: timestamp('check_in_time', { withTimezone: true }).notNull().defaultNow(),
   method: varchar('method', { length: 20 }).notNull().default('desk'),
-  recordedByUserId: uuid('recorded_by_user_id').references(() => users.id),
+  recordedByUserId: uuid('recorded_by_user_id').notNull().references(() => users.id),
   wasOverride: boolean('was_override').notNull().default(false),
   overrideReason: varchar('override_reason', { length: 255 }),
   isVoided: boolean('is_voided').notNull().default(false),
@@ -252,13 +252,13 @@ export const attendanceLogs = pgTable('attendance_logs', {
 // 14. audit_logs
 export const auditLogs = pgTable('audit_logs', {
   id: uuid('id').defaultRandom().primaryKey(),
-  gymId: uuid('gym_id').references(() => tenants.id, { onDelete: 'cascade' }),
+  gymId: uuid('gym_id').notNull().references(() => tenants.id, { onDelete: 'cascade' }),
   userId: uuid('user_id').references(() => users.id),
   actorType: varchar('actor_type', { length: 20 }).notNull().default('user'),
   action: varchar('action', { length: 50 }).notNull(),
   entityType: varchar('entity_type', { length: 50 }).notNull(),
   entityId: uuid('entity_id').notNull(),
-  changedFields: text('changed_fields').array().notNull(),
+  changedFields: text('changed_fields').array().notNull().default(sql`'{}'`),
   metadata: jsonb('metadata').notNull().default(sql`'{}'::jsonb`),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
 });
@@ -269,7 +269,7 @@ export const csvImportJobs = pgTable('csv_import_jobs', {
   gymId: uuid('gym_id').notNull().references(() => tenants.id, { onDelete: 'cascade' }),
   fileName: varchar('file_name', { length: 255 }).notNull(),
   fileSha256: varchar('file_sha256', { length: 64 }).notNull(),
-  totalRows: integer('total_rows').notNull(),
+  totalRows: integer('total_rows').notNull().default(0),
   processedRows: integer('processed_rows').notNull().default(0),
   errorCount: integer('error_count').notNull().default(0),
   errorsJson: jsonb('errors_json').notNull().default(sql`'[]'::jsonb`),
@@ -289,7 +289,7 @@ export const notificationLogs = pgTable('notification_logs', {
   memberId: uuid('member_id').notNull(),
   channel: varchar('channel', { length: 20 }).notNull(),
   template: varchar('template', { length: 50 }).notNull(),
-  status: varchar('status', { length: 20 }).notNull().default('sent'),
+  status: varchar('status', { length: 20 }).notNull(),
   errorMessage: text('error_message'),
   sentAt: timestamp('sent_at', { withTimezone: true }).notNull().defaultNow()
 }, (table) => [
@@ -305,11 +305,12 @@ export const receiptSequences = pgTable('receipt_sequences', {
 // 18. refresh_tokens
 export const refreshTokens = pgTable('refresh_tokens', {
   id: uuid('id').defaultRandom().primaryKey(),
-  gymId: uuid('gym_id').notNull().references(() => tenants.id, { onDelete: 'cascade' }),
+  gymId: uuid('gym_id').references(() => tenants.id, { onDelete: 'cascade' }),
   userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
   tokenHash: varchar('token_hash', { length: 255 }).notNull().unique(),
-  familyId: uuid('family_id').notNull(),
+  familyId: uuid('family_id').notNull().defaultRandom(),
   isRevoked: boolean('is_revoked').notNull().default(false),
+  revokedAt: timestamp('revoked_at', { withTimezone: true }),
   expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
 });

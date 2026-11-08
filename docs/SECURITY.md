@@ -84,4 +84,69 @@ When a subscription with a queued renewal is frozen, `apply_subscription_freeze_
 
 To eliminate SQL injection vulnerabilities:
 - All database queries must use parameterized placeholders (`$1, $2, ...`) or Drizzle ORM query builders.
-- A static analysis lint rule and pre-commit check ban template string interpolation (`${...}`) inside SQL query calls.
+- A static analysis lint rule (`scripts/check_no_raw_sql_concatenation.mjs`) and pre-commit check ban template string interpolation (`${...}`) inside SQL query calls.
+
+---
+
+## 5. Authentication, JWT Configuration & Session Security
+
+### Argon2id Password Hashing Parameters
+Passwords are protected using Argon2id with parameters aligned with OWASP guidelines:
+```typescript
+export const ARGON2ID_PARAMS = {
+  memoryCost: 65536, // 64 MiB RAM cost per hash
+  timeCost: 3,       // 3 iterations
+  parallelism: 4     // 4 threads
+} as const;
+```
+- Resistant to GPU, ASIC, and side-channel timing attacks.
+- SHA-256 is used strictly for high-entropy token hashing (refresh tokens, staff invites, password reset tokens) where brute-force is infeasible due to 256-bit entropy.
+
+### JWT Configuration & Algorithm Pinning
+- **Algorithm**: Pinned strictly to `HS256`. Both signing and verification explicitly specify `algorithms: ['HS256']`. Tokens with algorithm `none` or mismatched algorithms are immediately rejected.
+- **Secret Length**: Minimum 32 characters (256-bit entropy). The server throws an error on boot if `JWT_SECRET` is shorter.
+- **Standard Claims**:
+  - `iss`: `gym-saas-api`
+  - `aud`: `gym-saas-app`
+  - `sub`: `userId`
+  - `exp`: 15 minutes (short-lived access tokens)
+
+### JWT Secret Rotation Story
+The API supports zero-downtime key rotation through dual-secret verification:
+1. When rotating the secret, generate new secret `K_new`.
+2. Configure the server with `JWT_SECRET=K_new` and `JWT_SECRET_PREVIOUS=K_old`.
+3. Newly signed tokens use `K_new`.
+4. Existing tokens signed with `K_old` continue to verify against `JWT_SECRET_PREVIOUS` until expiration (15 minutes).
+5. After 15 minutes, remove `JWT_SECRET_PREVIOUS`.
+
+### Refresh Token Rotation with Concurrency Grace Window
+- Tokens are single-use and rotated on every `/api/auth/refresh`.
+- **Grace Window**: A 10-second grace window (`REFRESH_GRACE_WINDOW_MS = 10_000`) is supported. If two legitimate requests from the same client (e.g. concurrent browser tabs) present the same token within 10 seconds of its rotation, the server returns the active session rather than invalidating the token family.
+- **Reuse Detection**: Any reuse attempt occurring after the 10-second grace window is treated as an active token theft attack; the entire token family (`family_id`) is revoked immediately, logging out all sessions.
+
+### Login Throttling (Per-IP & Per-Account)
+- **Per-IP Rate Limiting**: Maximum 10 login requests per 15 minutes per IP address.
+- **Per-Account Throttling**: Tracks consecutive failed login attempts per phone number. After 5 failed attempts, the specific account is locked out for 5 minutes (`429 Too Many Requests`), mitigating distributed botnet brute-force attacks across rotating proxies.
+
+---
+
+## 6. Password Reset & The Unverified-Phone Threat Model
+
+### User Enumeration Protection
+- The public `POST /api/auth/password-reset/request` endpoint returns a uniform response regardless of whether the phone number is registered:
+  `"If an account exists for this phone number, a password reset instruction has been processed."`
+- Timing variations and error messages are normalized to prevent attackers from mapping registered users.
+
+### Owner-Initiated Reset Links for Phone-Only Users
+- Many gym facilities operate with phone-only staff and members who do not have email access.
+- Owners can generate a single-use 1-hour password reset link directly from the dashboard:
+  `POST /api/gyms/:gymId/members/:memberId/reset-password`
+- The owner can copy and send the link directly to the member via WhatsApp or SMS.
+
+### The Unverified-Phone Threat Model
+- **The Risk**: In front-desk operations where staff members manually type phone numbers during walk-in registrations, a member's phone number may be mistyped. If an owner initiates a password reset to that incorrect phone number, or if an account is activated without verification, the holder of the wrong number could receive the link.
+- **Defenses & Mitigations**:
+  1. Reset tokens have a strict 1-hour expiration and are single-use.
+  2. Every reset link generation is recorded in the append-only `audit_logs` table with `actor_type = 'user'` and the owner's `user_id`.
+  3. When an account is claimed or reset, a notification is logged in `notification_logs`.
+  4. **Production Requirement**: For member self-service portals, mandatory SMS OTP phone verification must be completed during member onboarding before allowing self-service account access.

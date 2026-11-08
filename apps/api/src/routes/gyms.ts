@@ -2,7 +2,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import type pg from 'pg';
 import { withTenantContext, members, eq, and } from '@gym/db';
 import { authenticateUser, createRequireTenantMembership } from '../middleware/auth.js';
-import { generateRandomToken, hashToken } from '../auth/crypto.js';
+import { generateRandomToken, hashToken, hashPassword } from '../auth/crypto.js';
 
 interface GymRoutesOptions {
   pool: pg.Pool;
@@ -149,5 +149,69 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
       expiresAt: expiresAt.toISOString(),
       inviteUrl: `https://app.gymsaas.local/invites/${rawToken}`
     });
+  });
+
+  // 6. Owner-Initiated Password Reset for Phone-Only Users
+  fastify.post<{
+    Params: { gymId: string; memberId: string };
+    Body?: { gym_id?: string; gymId?: string };
+  }>('/:gymId/members/:memberId/reset-password', {
+    preHandler: [authenticateUser, requireTenant]
+  }, async (req, reply) => {
+    const { gymId, userId, role: userRole } = req.tenantContext!;
+    const { memberId } = req.params;
+
+    if (userRole !== 'owner') {
+      return reply.status(403).send({ error: 'Only gym owners can initiate password resets for members' });
+    }
+
+    const result = await withTenantContext(pool, { gymId, userId }, async (db, client) => {
+      const rows = await db.select()
+        .from(members)
+        .where(and(eq(members.gymId, gymId), eq(members.id, memberId)));
+      const member = rows[0];
+      if (!member) {
+        return null;
+      }
+
+      const rawToken = generateRandomToken(32);
+      const tokenHash = hashToken(rawToken);
+      const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+
+      // Ensure a user account exists for this member's phone number
+      const userRes = await client.query<{ out_user_id: string }>(
+        'SELECT out_user_id FROM auth_lookup_user_by_phone($1);',
+        [member.phone]
+      );
+
+      if (!userRes.rows[0]) {
+        // Front-desk registered member who doesn't have an online user account yet
+        const tempPass = await hashPassword(generateRandomToken(16));
+        const fullName = `${member.firstName} ${member.lastName || ''}`.trim();
+        await client.query<{ auth_register_user: string }>(
+          'SELECT auth_register_user($1, $2, $3, $4) as auth_register_user;',
+          [member.phone, tempPass, fullName, member.email || null]
+        );
+      }
+
+      await client.query(
+        'SELECT auth_request_password_reset($1, $2, $3);',
+        [member.phone, tokenHash, expiresAt]
+      );
+
+      return {
+        memberId: member.id,
+        phone: member.phone,
+        resetToken: rawToken,
+        resetUrl: `https://app.gymsaas.local/reset-password?token=${rawToken}`,
+        expiresAt: expiresAt.toISOString()
+      };
+    });
+
+    if (!result) {
+      return reply.status(404).send({ error: 'Member not found in this gym' });
+    }
+
+    return reply.status(200).send(result);
   });
 };

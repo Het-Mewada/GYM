@@ -1,12 +1,14 @@
 import { hash, verify } from '@node-rs/argon2';
 import crypto from 'node:crypto';
 
+export const ARGON2ID_PARAMS = {
+  memoryCost: 65536, // 64 MiB
+  timeCost: 3,       // 3 iterations
+  parallelism: 4     // 4 threads
+} as const;
+
 export async function hashPassword(password: string): Promise<string> {
-  return hash(password, {
-    memoryCost: 65536,
-    timeCost: 3,
-    parallelism: 4
-  });
+  return hash(password, ARGON2ID_PARAMS);
 }
 
 export async function verifyPassword(hashString: string, password: string): Promise<boolean> {

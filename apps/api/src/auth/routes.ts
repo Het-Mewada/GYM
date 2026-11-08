@@ -8,6 +8,62 @@ interface AuthPluginOptions {
   pool: pg.Pool;
 }
 
+// -----------------------------------------------------------------------------
+// Per-Account Login Throttling (In addition to per-IP rate limiting)
+// -----------------------------------------------------------------------------
+interface AccountThrottleState {
+  attempts: number;
+  lockedUntil?: number;
+}
+
+const accountLoginAttempts = new Map<string, AccountThrottleState>();
+export const ACCOUNT_MAX_FAILED_ATTEMPTS = 5;
+export const ACCOUNT_LOCKOUT_MS = 5 * 60 * 1000; // 5 minutes
+
+export function resetAccountThrottler(): void {
+  accountLoginAttempts.clear();
+}
+
+export function recordFailedLogin(accountKey: string): { isLocked: boolean; remainingLockMs?: number } {
+  const now = Date.now();
+  const state = accountLoginAttempts.get(accountKey) || { attempts: 0 };
+
+  state.attempts += 1;
+  if (state.attempts >= ACCOUNT_MAX_FAILED_ATTEMPTS) {
+    state.lockedUntil = now + ACCOUNT_LOCKOUT_MS;
+    accountLoginAttempts.set(accountKey, state);
+    return { isLocked: true, remainingLockMs: ACCOUNT_LOCKOUT_MS };
+  }
+
+  accountLoginAttempts.set(accountKey, state);
+  return { isLocked: false };
+}
+
+export function isAccountLocked(accountKey: string): { isLocked: boolean; remainingLockMs?: number } {
+  const now = Date.now();
+  const state = accountLoginAttempts.get(accountKey);
+  if (!state || !state.lockedUntil) {
+    return { isLocked: false };
+  }
+
+  if (now < state.lockedUntil) {
+    return { isLocked: true, remainingLockMs: state.lockedUntil - now };
+  }
+
+  // Lockout expired
+  accountLoginAttempts.delete(accountKey);
+  return { isLocked: false };
+}
+
+export function clearAccountLockout(accountKey: string): void {
+  accountLoginAttempts.delete(accountKey);
+}
+
+// -----------------------------------------------------------------------------
+// Refresh Token Grace Window (Tolerates concurrent / multi-tab refreshes)
+// -----------------------------------------------------------------------------
+export const REFRESH_GRACE_WINDOW_MS = 10_000; // 10 seconds grace window
+
 export const authRoutes: FastifyPluginAsync<AuthPluginOptions> = async (fastify, { pool }) => {
   // 1. REGISTER
   fastify.post('/register', async (req: FastifyRequest<{
@@ -36,7 +92,7 @@ export const authRoutes: FastifyPluginAsync<AuthPluginOptions> = async (fastify,
     }
   });
 
-  // 2. LOGIN (Strict rate limit)
+  // 2. LOGIN (Strict rate limit + per-account throttling)
   fastify.post('/login', {
     config: {
       rateLimit: {
@@ -52,6 +108,14 @@ export const authRoutes: FastifyPluginAsync<AuthPluginOptions> = async (fastify,
       return reply.status(400).send({ error: 'Phone and password are required' });
     }
 
+    // Check account lockout
+    const lockCheck = isAccountLocked(phone);
+    if (lockCheck.isLocked) {
+      return reply.status(429).send({
+        error: 'Too many failed login attempts for this account. Please try again in 5 minutes.'
+      });
+    }
+
     // Lookup user via SECURITY DEFINER function
     const userRes = await pool.query<{
       out_user_id: string;
@@ -62,13 +126,28 @@ export const authRoutes: FastifyPluginAsync<AuthPluginOptions> = async (fastify,
 
     const user = userRes.rows[0];
     if (!user) {
+      const lockRes = recordFailedLogin(phone);
+      if (lockRes.isLocked) {
+        return reply.status(429).send({
+          error: 'Too many failed login attempts for this account. Please try again in 5 minutes.'
+        });
+      }
       return reply.status(401).send({ error: 'Invalid phone or password' });
     }
 
     const isValid = await verifyPassword(user.out_password_hash, password);
     if (!isValid) {
+      const lockRes = recordFailedLogin(phone);
+      if (lockRes.isLocked) {
+        return reply.status(429).send({
+          error: 'Too many failed login attempts for this account. Please try again in 5 minutes.'
+        });
+      }
       return reply.status(401).send({ error: 'Invalid phone or password' });
     }
+
+    // Success -> Clear failed login state
+    clearAccountLockout(phone);
 
     // Read user's memberships under app.user_id context
     const client = await pool.connect();
@@ -133,7 +212,7 @@ export const authRoutes: FastifyPluginAsync<AuthPluginOptions> = async (fastify,
     });
   });
 
-  // 3. REFRESH TOKEN ROTATION WITH REUSE DETECTION
+  // 3. REFRESH TOKEN ROTATION WITH REUSE DETECTION & CONCURRENCY GRACE WINDOW
   fastify.post('/refresh', async (req: FastifyRequest<{
     Body?: { refreshToken?: string }
   }>, reply: FastifyReply) => {
@@ -157,13 +236,14 @@ export const authRoutes: FastifyPluginAsync<AuthPluginOptions> = async (fastify,
 
       const tokenRes = await client.query<{
         id: string;
-        gym_id: string;
+        gym_id: string | null;
         user_id: string;
         family_id: string;
         is_revoked: boolean;
+        revoked_at: Date | null;
         expires_at: Date;
       }>(`
-        SELECT id, gym_id, user_id, family_id, is_revoked, expires_at
+        SELECT id, gym_id, user_id, family_id, is_revoked, revoked_at, expires_at
         FROM refresh_tokens
         WHERE user_id = $1 AND token_hash = $2
         FOR UPDATE;
@@ -175,12 +255,36 @@ export const authRoutes: FastifyPluginAsync<AuthPluginOptions> = async (fastify,
         return reply.status(401).send({ error: 'Invalid refresh token' });
       }
 
-      // REUSE DETECTION: If token is already revoked, an attacker or compromised party reused it!
+      // REUSE DETECTION CHECK:
       if (tokenRow.is_revoked) {
-        // Invalidate entire token family immediately
+        const revokedTime = tokenRow.revoked_at ? new Date(tokenRow.revoked_at).getTime() : 0;
+        const isWithinGraceWindow = revokedTime > 0 && (Date.now() - revokedTime) <= REFRESH_GRACE_WINDOW_MS;
+
+        if (isWithinGraceWindow) {
+          // Concurrent legitimate refresh! Return current active token in same family
+          const activeRes = await client.query<{ id: string; expires_at: Date }>(`
+            SELECT id, expires_at
+            FROM refresh_tokens
+            WHERE family_id = $1 AND is_revoked = false
+            ORDER BY created_at DESC
+            LIMIT 1;
+          `, [tokenRow.family_id]);
+
+          const activeToken = activeRes.rows[0];
+          if (activeToken && new Date(activeToken.expires_at) > new Date()) {
+            await client.query('COMMIT');
+            const accessToken = signAccessToken({
+              userId,
+              fullName: 'Refreshed User'
+            });
+            return reply.send({ accessToken });
+          }
+        }
+
+        // Out of grace window -> Actual reuse attack! Invalidate entire family
         await client.query(`
           UPDATE refresh_tokens
-          SET is_revoked = true
+          SET is_revoked = true, revoked_at = NOW()
           WHERE family_id = $1;
         `, [tokenRow.family_id]);
         await client.query('COMMIT');
@@ -198,10 +302,10 @@ export const authRoutes: FastifyPluginAsync<AuthPluginOptions> = async (fastify,
         return reply.status(401).send({ error: 'Refresh token has expired' });
       }
 
-      // Revoke current token (rotation)
+      // Revoke current token (rotation) and record revoked_at
       await client.query(`
         UPDATE refresh_tokens
-        SET is_revoked = true
+        SET is_revoked = true, revoked_at = NOW()
         WHERE id = $1;
       `, [tokenRow.id]);
 
@@ -253,7 +357,7 @@ export const authRoutes: FastifyPluginAsync<AuthPluginOptions> = async (fastify,
         await client.query("SELECT set_config('app.user_id', $1, true);", [userId]);
         await client.query(`
           UPDATE refresh_tokens
-          SET is_revoked = true
+          SET is_revoked = true, revoked_at = NOW()
           WHERE user_id = $1 AND token_hash = $2;
         `, [userId, tokenHash]);
         await client.query('COMMIT');
@@ -355,7 +459,7 @@ export const authRoutes: FastifyPluginAsync<AuthPluginOptions> = async (fastify,
     }
   });
 
-  // 6. PASSWORD RESET REQUEST
+  // 6. PASSWORD RESET REQUEST (No user enumeration protection)
   fastify.post('/password-reset/request', async (req: FastifyRequest<{
     Body: { phone: string }
   }>, reply: FastifyReply) => {
@@ -373,9 +477,9 @@ export const authRoutes: FastifyPluginAsync<AuthPluginOptions> = async (fastify,
       [phone, tokenHash, expiresAt]
     );
 
-    // In dev/test environment, return the token for testing convenience
+    // Uniform response: Never leaks whether phone exists or not
     return reply.send({
-      message: 'If the phone number exists, a reset token has been dispatched.',
+      message: 'If an account exists for this phone number, a password reset instruction has been processed.',
       debugToken: process.env.NODE_ENV !== 'production' ? rawToken : undefined
     });
   });

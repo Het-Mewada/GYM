@@ -1,15 +1,15 @@
 ======================================================================
 PART 1: CONTROL RUN (Validation Kept, ONLY pg_advisory_xact_lock Removed)
 ======================================================================
-- Control-Thread-1: SUCCESS (Inserted sub 229bd2b3-3673-4596-ad2d-b840d0ff445d)
-- Control-Thread-2: SUCCESS (Inserted sub b66522bb-f796-465f-a274-228b35ea3877)
+- Control-Thread-1: SUCCESS (Inserted sub 375d48d0-d78f-4b4e-adde-cd10682753d1)
+- Control-Thread-2: SUCCESS (Inserted sub 62886e22-69e9-4062-9b33-a78f920076a2)
 Result of Control Run: Total active overlapping subscriptions = 2
 CONFIRMED: Without pg_advisory_xact_lock, race condition occurs (overlapping active subscriptions committed).
 
 ======================================================================
 PART 2: GUARDED RUN (pg_advisory_xact_lock Restored and Active)
 ======================================================================
-- Guarded-Thread-1: SUCCESS (Inserted sub f3a756e5-fda3-4b51-98bf-84404daf753e)
-- Guarded-Thread-2: FAILED: Subscription dates [2026-12-15 to 2027-01-14] overlap with existing subscription f3a756e5-fda3-4b51-98bf-84404daf753e
+- Guarded-Thread-1: SUCCESS (Inserted sub 4c2a3a03-20f9-4359-9c76-0cf4c406b2d8)
+- Guarded-Thread-2: FAILED: Subscription dates [2026-12-15 to 2027-01-14] overlap with existing subscription 4c2a3a03-20f9-4359-9c76-0cf4c406b2d8
 Result of Guarded Run: Total active subscriptions = 1
 SUCCESS: Two-key advisory lock serialized the transactions. Exactly one succeeded, second was rejected with overlap error!

@@ -76,6 +76,7 @@ CREATE TABLE refresh_tokens (
   token_hash VARCHAR(64) NOT NULL UNIQUE,
   family_id UUID NOT NULL DEFAULT gen_random_uuid(),
   is_revoked BOOLEAN NOT NULL DEFAULT false,
+  revoked_at TIMESTAMPTZ,
   expires_at TIMESTAMPTZ NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

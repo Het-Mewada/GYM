@@ -1,4 +1,4 @@
-import Fastify from 'fastify';
+import Fastify, { type RouteOptions } from 'fastify';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import cookie from '@fastify/cookie';
@@ -8,12 +8,32 @@ import { assertDatabaseRole, createPool } from '@gym/db';
 import { authRoutes } from './auth/routes.js';
 import { gymRoutes } from './routes/gyms.js';
 
-export function buildApp(customPool?: pg.Pool) {
+export interface BuildAppOptions {
+  pool?: pg.Pool;
+  onRoute?: (routeOptions: RouteOptions) => void;
+}
+
+export function buildApp(customPoolOrOptions?: pg.Pool | BuildAppOptions) {
+  let pool: pg.Pool;
+  let onRoute: ((routeOptions: RouteOptions) => void) | undefined;
+
+  if (customPoolOrOptions && 'query' in customPoolOrOptions) {
+    pool = customPoolOrOptions as pg.Pool;
+  } else if (customPoolOrOptions) {
+    const opts = customPoolOrOptions as BuildAppOptions;
+    pool = opts.pool || createPool();
+    onRoute = opts.onRoute;
+  } else {
+    pool = createPool();
+  }
+
   const app = Fastify({
     logger: process.env.NODE_ENV !== 'test'
   });
 
-  const pool = customPool || createPool();
+  if (onRoute) {
+    app.addHook('onRoute', onRoute);
+  }
 
   app.register(helmet, { contentSecurityPolicy: false });
   app.register(cors, { origin: true, credentials: true });

@@ -9,6 +9,8 @@ build/
 *.log
 !docs/verification/*.log
 .env
+.env*
+!.env.example
 .env.local
 .env.*.local
 coverage/
