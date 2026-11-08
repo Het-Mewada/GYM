@@ -119,6 +119,7 @@ export const members = pgTable('members', {
 }, (table) => [
   uniqueIndex('uq_members_gym_id').on(table.gymId, table.id),
   uniqueIndex('uq_members_gym_phone').on(table.gymId, table.phone),
+  uniqueIndex('uq_members_gym_email').on(table.gymId, table.email),
   uniqueIndex('uq_members_gym_number').on(table.gymId, table.memberNumber)
 ]);
 

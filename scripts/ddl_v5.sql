@@ -156,10 +156,11 @@ CREATE TABLE members (
   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT uq_members_gym_id UNIQUE (gym_id, id),
-  CONSTRAINT uq_members_gym_member_number UNIQUE (gym_id, member_number)
+  CONSTRAINT uq_members_gym_member_number UNIQUE (gym_id, member_number),
+  CONSTRAINT uq_members_gym_phone UNIQUE (gym_id, phone)
 );
+CREATE UNIQUE INDEX uq_members_gym_lower_email ON members (gym_id, lower(email)) WHERE email IS NOT NULL;
 CREATE INDEX idx_members_name_trgm ON members USING gin ((first_name || ' ' || COALESCE(last_name, '')) gin_trgm_ops);
-CREATE INDEX idx_members_gym_phone ON members(gym_id, phone);
 
 CREATE TABLE subscriptions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

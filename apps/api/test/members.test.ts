@@ -127,6 +127,38 @@ describe('Members API: List, Create, and Search with Tenant Isolation', () => {
     expect(invalidRes2.json().error).toContain('firstName and phone are required');
   });
 
+  it('2b. rejects duplicate phone or duplicate email within the same gym (409 Conflict)', async () => {
+    // Duplicate phone in Gym 1 (Suresh has '+919811100001')
+    const dupPhoneRes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gym1Id}/members`,
+      headers: { authorization: `Bearer ${gym1Token}` },
+      payload: {
+        firstName: 'Duplicate',
+        lastName: 'PhonePerson',
+        phone: '+919811100001',
+        email: 'unique.email@example.com'
+      }
+    });
+    expect(dupPhoneRes.statusCode).toBe(409);
+    expect(dupPhoneRes.json().error).toContain('phone number already exists');
+
+    // Duplicate email in Gym 1 (Suresh has 'suresh@example.com')
+    const dupEmailRes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gym1Id}/members`,
+      headers: { authorization: `Bearer ${gym1Token}` },
+      payload: {
+        firstName: 'Duplicate',
+        lastName: 'EmailPerson',
+        phone: '+919811100099',
+        email: 'SURESH@example.com' // Case-insensitive test
+      }
+    });
+    expect(dupEmailRes.statusCode).toBe(409);
+    expect(dupEmailRes.json().error).toContain('email already exists');
+  });
+
   it('3. searches members by single first name, last name, combined name, phone, and member number', async () => {
     // Search by first name
     const q1 = await app.inject({

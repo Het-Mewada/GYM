@@ -162,6 +162,21 @@ export default function MembersPage() {
       return;
     }
 
+    // Validate duplicate phone or email in this gym
+    const duplicatePhone = members.find((m) => m.phone === phone.trim());
+    if (duplicatePhone) {
+      setFormError(`A member with phone number "${phone.trim()}" is already registered (${duplicatePhone.firstName} ${duplicatePhone.lastName || ''}).`);
+      return;
+    }
+
+    if (email.trim()) {
+      const duplicateEmail = members.find((m) => m.email && m.email.toLowerCase() === email.trim().toLowerCase());
+      if (duplicateEmail) {
+        setFormError(`A member with email "${email.trim()}" is already registered (${duplicateEmail.firstName} ${duplicateEmail.lastName || ''}).`);
+        return;
+      }
+    }
+
     setIsSubmitting(true);
     const input: CreateMemberInput = {
       firstName: firstName.trim(),

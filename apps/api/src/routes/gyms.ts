@@ -139,6 +139,28 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
 
     try {
       const created = await withTenantContext(pool, { gymId, userId }, async (db, client) => {
+        // Pre-check for duplicate phone or email within this gym
+        const existing = await client.query<{ phone: string; email: string | null }>(
+          `SELECT phone, email FROM members 
+           WHERE gym_id = $1 AND (phone = $2 OR (email IS NOT NULL AND lower(email) = lower($3)))
+           LIMIT 1;`,
+          [gymId, phone.trim(), email?.trim() || null]
+        );
+
+        if (existing.rows.length > 0) {
+          const match = existing.rows[0];
+          if (match.phone === phone.trim()) {
+            const err = new Error('A member with this phone number already exists in this gym') as Error & { statusCode: number };
+            err.statusCode = 409;
+            throw err;
+          }
+          if (email?.trim() && match.email && match.email.toLowerCase() === email.trim().toLowerCase()) {
+            const err = new Error('A member with this email already exists in this gym') as Error & { statusCode: number };
+            err.statusCode = 409;
+            throw err;
+          }
+        }
+
         // Generate monotonic member number
         const seqRes = await client.query<{ generate_next_member_number: string }>(
           'SELECT generate_next_member_number($1) as generate_next_member_number;',
@@ -169,12 +191,19 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
         code?: string;
         constraint?: string;
         message?: string;
+        statusCode?: number;
       };
+      if (dbErr.statusCode === 409) {
+        return reply.status(409).send({ error: dbErr.message });
+      }
       if (dbErr.code === '23505') {
         if (dbErr.constraint?.includes('phone')) {
           return reply.status(409).send({ error: 'A member with this phone number already exists in this gym' });
         }
-        return reply.status(409).send({ error: 'A member with this sequence number or details already exists' });
+        if (dbErr.constraint?.includes('email')) {
+          return reply.status(409).send({ error: 'A member with this email already exists in this gym' });
+        }
+        return reply.status(409).send({ error: 'A member with these details already exists in this gym' });
       }
       return reply.status(400).send({ error: dbErr.message || 'Failed to create member' });
     }
