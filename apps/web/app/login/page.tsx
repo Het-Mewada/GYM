@@ -7,8 +7,8 @@ import { loginUser } from '../lib/api';
 
 export default function LoginPage() {
   const router = useRouter();
-  const [phone, setPhone] = useState('+919999999999');
-  const [password, setPassword] = useState('Password123!');
+  const [phone, setPhone] = useState('');
+  const [password, setPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -29,29 +29,6 @@ export default function LoginPage() {
       router.push('/members');
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Login failed. Please check your credentials.');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const handleDemoSignIn = async () => {
-    setPhone('+919999999999');
-    setPassword('Password123!');
-    setError(null);
-    setIsLoading(true);
-
-    try {
-      const res = await loginUser('+919999999999', 'Password123!');
-      if (typeof window !== 'undefined') {
-        localStorage.setItem('access_token', res.accessToken);
-        localStorage.setItem('user_name', res.user.fullName);
-        if (res.memberships && res.memberships.length > 0) {
-          localStorage.setItem('gym_id', res.memberships[0].gym_id);
-        }
-      }
-      router.push('/members');
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Demo login failed');
     } finally {
       setIsLoading(false);
     }
@@ -116,30 +93,9 @@ export default function LoginPage() {
           </button>
         </form>
 
-        <div className="relative my-6">
-          <div className="absolute inset-0 flex items-center">
-            <div className="w-full border-t border-neutral-800" />
-          </div>
-          <div className="relative flex justify-center text-xs uppercase">
-            <span className="bg-neutral-900 px-2 text-neutral-500">Quick Testing</span>
-          </div>
-        </div>
-
-        <button
-          type="button"
-          onClick={handleDemoSignIn}
-          disabled={isLoading}
-          className="w-full py-2.5 rounded-lg border border-neutral-700 bg-neutral-800/80 hover:bg-neutral-800 text-neutral-200 font-medium text-xs transition flex items-center justify-center gap-2 cursor-pointer"
-        >
-          <svg className="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
-          </svg>
-          1-Click Demo Owner Sign-In (+919999999999)
-        </button>
-
         <div className="mt-6 text-center text-xs text-neutral-500">
           <Link href="/members" className="text-emerald-400 hover:underline">
-            ← Back to Members Directory Preview
+            ← Back to Members Directory
           </Link>
         </div>
       </div>

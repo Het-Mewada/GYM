@@ -4,68 +4,11 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import Link from 'next/link';
 import { type Member, type CreateMemberInput, fetchMembers, createMember } from '../lib/api';
 
-const DEFAULT_DEMO_GYM_ID = '00000000-0000-0000-0000-000000000001';
-
-// Seed members for preview demonstration
-const INITIAL_DEMO_MEMBERS: Member[] = [
-  {
-    id: 'mem-001',
-    gymId: DEFAULT_DEMO_GYM_ID,
-    memberNumber: 'MEM-00001',
-    firstName: 'Suresh',
-    lastName: null,
-    phone: '+919876543210',
-    email: 'suresh@example.com',
-    gender: 'male',
-    dateOfBirth: '1992-05-14',
-    emergencyContactName: 'Mahesh',
-    emergencyContactPhone: '+919876543299',
-    status: 'active',
-    joinedDate: '2026-01-10',
-    createdAt: '2026-01-10T09:00:00Z',
-    updatedAt: '2026-01-10T09:00:00Z'
-  },
-  {
-    id: 'mem-002',
-    gymId: DEFAULT_DEMO_GYM_ID,
-    memberNumber: 'MEM-00002',
-    firstName: 'Priya',
-    lastName: 'Sharma',
-    phone: '+919876500002',
-    email: 'priya.sharma@example.com',
-    gender: 'female',
-    dateOfBirth: '1995-08-22',
-    emergencyContactName: 'Sunil Sharma',
-    emergencyContactPhone: '+919876500099',
-    status: 'active',
-    joinedDate: '2026-02-01',
-    createdAt: '2026-02-01T10:30:00Z',
-    updatedAt: '2026-02-01T10:30:00Z'
-  },
-  {
-    id: 'mem-003',
-    gymId: DEFAULT_DEMO_GYM_ID,
-    memberNumber: 'MEM-00003',
-    firstName: 'Ramesh',
-    lastName: 'Patel',
-    phone: '+919876500003',
-    email: 'ramesh.p@example.com',
-    gender: 'male',
-    dateOfBirth: '1988-11-03',
-    emergencyContactName: 'Anil Patel',
-    emergencyContactPhone: '+919876500088',
-    status: 'inactive',
-    joinedDate: '2025-11-15',
-    createdAt: '2025-11-15T08:15:00Z',
-    updatedAt: '2026-03-01T12:00:00Z'
-  }
-];
-
 export default function MembersPage() {
-  const [gymId, setGymId] = useState<string>(DEFAULT_DEMO_GYM_ID);
+  const [gymId, setGymId] = useState<string>('');
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [userName, setUserName] = useState<string | null>(null);
-  const [members, setMembers] = useState<Member[]>(INITIAL_DEMO_MEMBERS);
+  const [members, setMembers] = useState<Member[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive'>('all');
   const [isLoading, setIsLoading] = useState(false);
@@ -107,8 +50,7 @@ export default function MembersPage() {
     if (typeof window === 'undefined') return;
     const token = localStorage.getItem('access_token');
 
-    // In unauthenticated preview mode, do not fire network request to avoid 401
-    if (!token) {
+    if (!token || !gymId) {
       setIsLoading(false);
       return;
     }
@@ -128,13 +70,13 @@ export default function MembersPage() {
   }, [gymId, searchQuery, statusFilter]);
 
   useEffect(() => {
-    if (isAuthenticated) {
+    if (isAuthenticated && gymId) {
       const timer = setTimeout(() => {
         loadMembers();
       }, 150);
       return () => clearTimeout(timer);
     }
-  }, [isAuthenticated, loadMembers]);
+  }, [isAuthenticated, gymId, loadMembers]);
 
   const handleLogout = () => {
     if (typeof window !== 'undefined') {
@@ -144,8 +86,8 @@ export default function MembersPage() {
     }
     setIsAuthenticated(false);
     setUserName(null);
-    setGymId(DEFAULT_DEMO_GYM_ID);
-    setMembers(INITIAL_DEMO_MEMBERS);
+    setGymId('');
+    setMembers([]);
   };
 
   // Handle Form Submission
@@ -192,18 +134,18 @@ export default function MembersPage() {
     try {
       const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined;
 
-      if (token) {
+      if (token && gymId) {
         // Authenticated live mode: write to Postgres via Fastify
         const res = await createMember(gymId, input, token);
         if (res && res.member) {
           setMembers((prev) => [res.member, ...prev]);
         }
       } else {
-        // Client preview mode: generate local member
+        // Standalone / client preview mode: generate local member
         const newSeq = (members.length + 1).toString().padStart(5, '0');
         const localMember: Member = {
           id: `mem-${Date.now()}`,
-          gymId,
+          gymId: gymId || 'local-gym',
           memberNumber: `MEM-${newSeq}`,
           firstName: input.firstName,
           lastName: input.lastName || null,
@@ -244,7 +186,7 @@ export default function MembersPage() {
       // Backend handles search and status filtering via SQL
       return members;
     }
-    // Preview mode: filter in-memory
+    // Client-side filtering when unauthenticated
     return members.filter((m) => {
       if (statusFilter !== 'all' && m.status !== statusFilter) return false;
       if (!searchQuery.trim()) return true;
@@ -277,7 +219,7 @@ export default function MembersPage() {
             </Link>
             <span className="text-neutral-600">/</span>
             <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-neutral-800 text-neutral-300 border border-neutral-700">
-              {isAuthenticated ? 'Live Multi-Tenant Pod' : 'Preview Pod'}
+              {isAuthenticated ? 'Tenanted Pod' : 'Unauthenticated'}
             </span>
           </div>
 
@@ -296,7 +238,7 @@ export default function MembersPage() {
                 <div className="flex items-center space-x-3">
                   <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-950/80 text-emerald-400 border border-emerald-800">
                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                    {userName || 'Gym Staff'}
+                    {userName || 'Staff'}
                   </span>
                   <button
                     onClick={handleLogout}
@@ -320,20 +262,20 @@ export default function MembersPage() {
 
       {/* Main Content Area */}
       <main className="max-w-7xl mx-auto px-6 py-8 flex-1 w-full space-y-6">
-        {/* Preview Mode Notice Banner */}
+        {/* Unauthenticated Notice Banner */}
         {!isAuthenticated && (
-          <div data-testid="preview-mode-banner" className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 rounded-xl border border-emerald-900/60 bg-emerald-950/20 text-emerald-200 text-xs">
+          <div data-testid="preview-mode-banner" className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 rounded-xl border border-neutral-800 bg-neutral-900/60 text-neutral-300 text-xs">
             <div className="flex items-center gap-2.5">
-              <span className="flex h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+              <span className="flex h-2 w-2 rounded-full bg-amber-400 animate-pulse" />
               <span>
-                <strong>Preview Mode:</strong> Viewing local mock data. Sign in with your gym staff account to sync with the PostgreSQL cloud database.
+                <strong>Session Required:</strong> Sign in with your gym staff account to sync with the database.
               </span>
             </div>
             <Link
               href="/login"
               className="inline-flex items-center justify-center px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-black font-semibold text-xs transition whitespace-nowrap"
             >
-              Sign In (Demo Account Available)
+              Sign In
             </Link>
           </div>
         )}

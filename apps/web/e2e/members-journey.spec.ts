@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 
 test.describe('Members Directory Journey (Slice 1)', () => {
-  test('navigates to members directory, searches members, creates single-name member, and filters by status', async ({ page }) => {
+  test('navigates to members directory, adds members, searches, and filters', async ({ page }) => {
     // Track any unauthorized network requests
     const unauthorizedRequests: string[] = [];
     page.on('response', (response) => {
@@ -18,42 +18,20 @@ test.describe('Members Directory Journey (Slice 1)', () => {
     await expect(directoryLink).toBeVisible();
     await directoryLink.click();
 
-    // 2. Verify Members Page loaded in preview mode without unauthenticated 401 errors
+    // 2. Verify Members Page loaded in initial clean empty state
     await expect(page).toHaveURL(/\/members/);
     await expect(page.locator('h1')).toContainText('Members Directory');
     await expect(page.locator('[data-testid="preview-mode-banner"]')).toBeVisible();
     expect(unauthorizedRequests).toHaveLength(0);
 
-    const table = page.locator('[data-testid="members-table"]');
-    await expect(table).toBeVisible();
-
-    // Verify initial seeded entries exist
-    await expect(table).toContainText('Suresh');
-    await expect(table).toContainText('Priya Sharma');
-    await expect(table).toContainText('Ramesh Patel');
-
-    // 3. Search for a member by name
-    const searchInput = page.locator('[data-testid="member-search-input"]');
-    await searchInput.fill('Priya');
-
-    // Verify table filtered
-    await expect(table).toContainText('Priya Sharma');
-    await expect(table).not.toContainText('Ramesh Patel');
-
-    // 4. Clear search query
-    const clearButton = page.locator('[data-testid="clear-search-button"]');
-    await clearButton.click();
-    await expect(table).toContainText('Ramesh Patel');
-
-    // 5. Search for non-existent member and verify empty state
-    await searchInput.fill('NonExistentGymMember999');
     const emptyState = page.locator('[data-testid="empty-state"]');
     await expect(emptyState).toBeVisible();
     await expect(emptyState).toContainText('No members found');
 
-    await searchInput.fill('');
+    const table = page.locator('[data-testid="members-table"]');
+    await expect(table).toBeVisible();
 
-    // 6. Add new single-name member (supports single name without required last name)
+    // 3. Add first single-name member "Vikram" (supports single name without required last name)
     const addMemberBtn = page.locator('[data-testid="add-member-button"]');
     await addMemberBtn.click();
 
@@ -76,21 +54,41 @@ test.describe('Members Directory Journey (Slice 1)', () => {
     await expect(table).toContainText('Vikram');
     await expect(table).toContainText('+919988776655');
 
-    // 7. Search for newly added single-name member
-    await searchInput.fill('Vikram');
+    // 4. Add second member "Priya Sharma"
+    await addMemberBtn.click();
+    await expect(modal).toBeVisible();
+    await page.locator('[data-testid="first-name-input"]').fill('Priya');
+    await page.locator('[data-testid="last-name-input"]').fill('Sharma');
+    await page.locator('[data-testid="phone-input"]').fill('+919876500002');
+    await page.locator('[data-testid="email-input"]').fill('priya.sharma@example.com');
+    await page.locator('[data-testid="gender-select"]').selectOption('female');
+    await saveBtn.click();
+    await expect(modal).not.toBeVisible();
+
+    await expect(table).toContainText('Priya Sharma');
+
+    // 5. Search for a member by name
+    const searchInput = page.locator('[data-testid="member-search-input"]');
+    await searchInput.fill('Priya');
+
+    // Verify table filtered
+    await expect(table).toContainText('Priya Sharma');
+    await expect(table).not.toContainText('Vikram');
+
+    // 6. Clear search query
+    const clearButton = page.locator('[data-testid="clear-search-button"]');
+    await clearButton.click();
     await expect(table).toContainText('Vikram');
-    await expect(table).not.toContainText('Priya Sharma');
+    await expect(table).toContainText('Priya Sharma');
 
-    // 8. Filter by status
+    // 7. Search for non-existent member and verify empty state
+    await searchInput.fill('NonExistentGymMember999');
+    await expect(emptyState).toBeVisible();
+    await expect(emptyState).toContainText('No members found');
+
     await searchInput.fill('');
-    const statusFilter = page.locator('[data-testid="status-filter"]');
-    await statusFilter.selectOption('inactive');
 
-    // Only inactive members should be shown
-    await expect(table).toContainText('Ramesh Patel');
-    await expect(table).not.toContainText('Suresh');
-
-    // Confirm that throughout the entire preview workflow zero 401 errors were triggered
+    // 8. Confirm zero 401 errors were triggered
     expect(unauthorizedRequests).toHaveLength(0);
   });
 });
