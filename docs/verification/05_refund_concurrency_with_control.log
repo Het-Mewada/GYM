@@ -9,7 +9,7 @@ CONFIRMED: Without pg_advisory_xact_lock, race condition occurs (over-refund of 
 ======================================================================
 PART 2: GUARDED RUN (pg_advisory_xact_lock Restored and Active)
 ======================================================================
-- Guarded-Thread-1: SUCCESS (Refunded 3000 cents)
-- Guarded-Thread-2: FAILED: Cumulative refund amount (6000) exceeds original payment (5000).
+- Guarded-Thread-1: FAILED: Cumulative refund amount (6000) exceeds original payment (5000).
+- Guarded-Thread-2: SUCCESS (Refunded 3000 cents)
 Result of Guarded Run: Total Refunded = 3000 cents against 5000 cents parent.
 SUCCESS: Two-key advisory lock serialized the transactions. Exactly one succeeded, second was rejected with over-refund error!

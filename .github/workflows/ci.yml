@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'phase-*']
   pull_request:
-    branches: [main]
+    branches: [main, 'phase-*']
 
 jobs:
   validate:
@@ -40,19 +40,27 @@ jobs:
           node-version: 22
           cache: 'pnpm'
 
+      - name: Install PostgreSQL Client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile=false
 
-      - name: Lint
+      - name: Lint & Security Checks
         run: pnpm run lint
 
       - name: Typecheck
         run: pnpm run typecheck
 
-      - name: Run Test Suites
+      - name: Initialize Database Roles and Apply DDL v5
+        run: |
+          PGPASSWORD=postgres_ci_password psql -h localhost -p 5432 -U postgres -d gym_saas_test -f docker/initdb/01-init-roles.sql
+          PGPASSWORD=postgres_ci_password psql -h localhost -p 5432 -U postgres -d gym_saas_test -f scripts/ddl_v5.sql
+
+      - name: Run Test Suites (HTTP Cross-Tenant, Auth, Concurrency, Catalog, Drift)
         run: pnpm run test
         env:
-          DATABASE_URL: postgres://postgres:postgres_ci_password@localhost:5432/gym_saas_test
+          DATABASE_URL: postgres://app_user:dev_app_password_only@localhost:5432/gym_saas_test
 
       - name: Build applications
         run: pnpm run build

@@ -71,7 +71,7 @@ CREATE TABLE password_resets (
 -- refresh_tokens has gym_id and user_id, with user_id-keyed RLS
 CREATE TABLE refresh_tokens (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  gym_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  gym_id UUID REFERENCES tenants(id) ON DELETE CASCADE,
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   token_hash VARCHAR(64) NOT NULL UNIQUE,
   family_id UUID NOT NULL DEFAULT gen_random_uuid(),
@@ -730,6 +730,33 @@ END;
 $$;
 ALTER FUNCTION auth_complete_password_reset OWNER TO definer_admin;
 
+-- Function 2b: Request Password Reset
+CREATE OR REPLACE FUNCTION auth_request_password_reset(
+  p_phone VARCHAR,
+  p_token_hash VARCHAR,
+  p_expires_at TIMESTAMPTZ
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_user_id UUID;
+BEGIN
+  SELECT id INTO v_user_id FROM users WHERE phone = p_phone;
+  IF v_user_id IS NULL THEN
+    RETURN false;
+  END IF;
+
+  INSERT INTO password_resets (user_id, token_hash, expires_at)
+  VALUES (v_user_id, p_token_hash, p_expires_at);
+
+  RETURN true;
+END;
+$$;
+ALTER FUNCTION auth_request_password_reset OWNER TO definer_admin;
+
 -- Function 3: Provision Gym Tenant
 CREATE OR REPLACE FUNCTION provision_gym(
   p_owner_id UUID,
@@ -1043,6 +1070,7 @@ GRANT EXECUTE ON FUNCTION _generate_next_receipt_number_internal(UUID, TIMESTAMP
 GRANT EXECUTE ON FUNCTION auth_register_user TO app_user;
 GRANT EXECUTE ON FUNCTION auth_lookup_user_by_phone TO app_user;
 GRANT EXECUTE ON FUNCTION auth_complete_password_reset TO app_user;
+GRANT EXECUTE ON FUNCTION auth_request_password_reset TO app_user;
 GRANT EXECUTE ON FUNCTION provision_gym TO app_user;
 GRANT EXECUTE ON FUNCTION update_tenant_settings TO app_user;
 GRANT EXECUTE ON FUNCTION get_tenant_settings TO app_user;

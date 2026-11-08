@@ -142,6 +142,10 @@ $($webHealth | ConvertTo-Json -Depth 5)
 
 $healthLog | Tee-Object -FilePath "docs/verification/07_health_checks.log"
 
+Write-Host "`n>>> STEP 10: Executing Vitest Test Suites (API, DB, Auth, Cross-Tenant, Drift, Concurrency)"
+pnpm run test | Tee-Object -FilePath "docs/verification/08_vitest_suites.log"
+Assert-CommandSuccess "Vitest test suites"
+
 # Normalize all log files to UTF-8 without BOM
 Get-ChildItem "docs/verification/*.log" | ForEach-Object {
     $content = Get-Content $_.FullName

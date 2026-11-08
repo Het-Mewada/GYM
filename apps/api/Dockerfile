@@ -1,5 +1,5 @@
 FROM node:22-alpine AS base
-RUN corepack enable && corepack prepare pnpm@12.18.0 --activate
+RUN npm install -g pnpm@12.18.0
 WORKDIR /app
 
 FROM base AS builder
@@ -8,6 +8,7 @@ COPY packages/ packages/
 COPY apps/api/ apps/api/
 RUN pnpm install --frozen-lockfile=false
 RUN pnpm --filter @gym/shared run build
+RUN pnpm --filter @gym/db run build
 RUN pnpm --filter @gym/api run build
 
 FROM base AS runner
