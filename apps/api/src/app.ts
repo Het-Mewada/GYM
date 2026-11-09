@@ -3,6 +3,7 @@ import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import cookie from '@fastify/cookie';
 import rateLimit from '@fastify/rate-limit';
+import multipart from '@fastify/multipart';
 import type pg from 'pg';
 import { assertDatabaseRole, createPool } from '@gym/db';
 import { authRoutes } from './auth/routes.js';
@@ -76,6 +77,12 @@ export function buildApp(customPoolOrOptions?: pg.Pool | BuildAppOptions) {
   app.register(rateLimit, {
     max: 1000,
     timeWindow: '1 minute'
+  });
+  app.register(multipart, {
+    limits: {
+      fileSize: 10 * 1024 * 1024,
+      files: 1
+    }
   });
 
   // Health endpoint

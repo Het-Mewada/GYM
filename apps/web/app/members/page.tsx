@@ -26,6 +26,7 @@ import { useToast } from '../components/Toast';
 import { Navbar } from '../components/Navbar';
 import { PhoneInput, parsePhone } from '../components/PhoneInput';
 import { TenantQrModal } from '../components/TenantQrModal';
+import { CsvImportModal } from '../components/CsvImportModal';
 
 export default function MembersPage() {
   const router = useRouter();
@@ -46,6 +47,7 @@ export default function MembersPage() {
   // Tab & Registration Requests State
   const [activeTab, setActiveTab] = useState<'directory' | 'requests'>('directory');
   const [isQrModalOpen, setIsQrModalOpen] = useState(false);
+  const [isCsvModalOpen, setIsCsvModalOpen] = useState(false);
   const [pendingRequests, setPendingRequests] = useState<MemberRegistrationRequest[]>([]);
   const [isLoadingRequests, setIsLoadingRequests] = useState(false);
   const [approvingId, setApprovingId] = useState<string | null>(null);
@@ -784,6 +786,18 @@ export default function MembersPage() {
           </div>
 
           <div className="flex items-center gap-3">
+            <button
+              type="button"
+              data-testid="import-csv-button"
+              onClick={() => setIsCsvModalOpen(true)}
+              className="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-neutral-900 hover:bg-neutral-800 text-neutral-200 border border-neutral-700 font-semibold text-sm transition shadow-sm cursor-pointer"
+            >
+              <svg className="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+              </svg>
+              Import CSV
+            </button>
+
             <button
               type="button"
               data-testid="qr-code-button"
@@ -1840,6 +1854,14 @@ export default function MembersPage() {
         gymId={gymId}
         gymName={gymName || 'Gym'}
         gymSlug={gymSlug}
+      />
+
+      {/* CSV Member Importer Modal */}
+      <CsvImportModal
+        isOpen={isCsvModalOpen}
+        onClose={() => setIsCsvModalOpen(false)}
+        gymId={gymId}
+        onImportSuccess={loadMembers}
       />
     </div>
   );

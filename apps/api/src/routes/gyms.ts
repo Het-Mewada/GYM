@@ -1,7 +1,8 @@
 import type { FastifyPluginAsync } from 'fastify';
 import type pg from 'pg';
-import { withTenantContext, members, memberRegistrationRequests, membershipPlans, subscriptions, paymentTransactions, attendanceLogs, eq, and, or, ilike, isNull, desc, sql } from '@gym/db';
-import { PaymentRecordSchema, RefundRecordSchema, AttendanceCheckInSchema, AttendanceVoidSchema, MemberRegistrationRejectSchema } from '@gym/shared';
+import crypto from 'node:crypto';
+import { withTenantContext, members, memberRegistrationRequests, membershipPlans, subscriptions, paymentTransactions, attendanceLogs, csvImportJobs, eq, and, or, ilike, isNull, desc, sql } from '@gym/db';
+import { PaymentRecordSchema, RefundRecordSchema, AttendanceCheckInSchema, AttendanceVoidSchema, MemberRegistrationRejectSchema, parseCsv, normalizeCsvHeader, validateCsvRow, type PiiFreeCsvError } from '@gym/shared';
 import { authenticateUser, createRequireTenantMembership } from '../middleware/auth.js';
 import { generateRandomToken, hashToken, hashPassword } from '../auth/crypto.js';
 
@@ -2054,5 +2055,278 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
     } finally {
       client.release();
     }
+  });
+
+  // 17. CSV Member Importer: Upload & transactional batch import
+  fastify.post<{
+    Params: { gymId: string };
+  }>('/:gymId/members/import-csv', {
+    preHandler: [authenticateUser, requireTenant]
+  }, async (req, reply) => {
+    const { gymId } = req.params;
+    const tenantContext = req.tenantContext!;
+
+    // Check permissions: owner, manager, or superadmin
+    if (tenantContext.role !== 'owner' && tenantContext.role !== 'manager' && !req.user?.isPlatformAdmin) {
+      return reply.status(403).send({ error: 'Forbidden: Only owners and managers can import members via CSV' });
+    }
+
+    let csvText = '';
+    let fileName = 'members.csv';
+
+    if (req.isMultipart()) {
+      const fileData = await req.file();
+      if (!fileData) {
+        return reply.status(400).send({ error: 'No CSV file uploaded' });
+      }
+      fileName = fileData.filename || 'members.csv';
+      const buffer = await fileData.toBuffer();
+      csvText = buffer.toString('utf-8');
+    } else if (req.body && typeof req.body === 'object') {
+      const b = req.body as { csvContent?: string; fileName?: string };
+      csvText = b.csvContent || '';
+      fileName = b.fileName || 'members.csv';
+    } else if (typeof req.body === 'string') {
+      csvText = req.body;
+    }
+
+    if (!csvText || !csvText.trim()) {
+      return reply.status(400).send({ error: 'CSV file is empty' });
+    }
+
+    // Compute SHA-256 hash to prevent duplicate uploads
+    const fileSha256 = crypto.createHash('sha256').update(csvText.trim()).digest('hex');
+
+    // Check if duplicate file was already imported for this gym
+    const existingJob = await withTenantContext(pool, tenantContext, async (db) => {
+      return db
+        .select()
+        .from(csvImportJobs)
+        .where(and(eq(csvImportJobs.gymId, gymId), eq(csvImportJobs.fileSha256, fileSha256)));
+    });
+
+    if (existingJob.length > 0) {
+      return reply.status(409).send({
+        error: 'This CSV file has already been imported for this gym (duplicate file hash detected).'
+      });
+    }
+
+    // Parse CSV
+    const parsed = parseCsv(csvText);
+    if (parsed.headers.length === 0 || parsed.rows.length === 0) {
+      return reply.status(400).send({ error: 'CSV contains no data rows to import' });
+    }
+
+    const normalizedHeaders = parsed.headers.map(normalizeCsvHeader);
+    if (!normalizedHeaders.includes('firstName') || !normalizedHeaders.includes('phone')) {
+      return reply.status(400).send({
+        error: 'CSV must contain at least "First Name" and "Phone" columns'
+      });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query("SELECT set_config('app.gym_id', $1, true);", [gymId]);
+      await client.query("SELECT set_config('app.user_id', $1, true);", [tenantContext.userId]);
+
+      // Insert initial job record in processing status
+      const insertJobRes = await client.query<{ id: string }>(
+        `INSERT INTO csv_import_jobs (gym_id, file_name, file_sha256, total_rows, processed_rows, error_count, errors_json, status, created_by_user_id)
+         VALUES ($1, $2, $3, $4, 0, 0, '[]'::jsonb, 'processing', $5)
+         RETURNING id;`,
+        [gymId, fileName, fileSha256, parsed.rows.length, tenantContext.userId]
+      );
+      const jobId = insertJobRes.rows[0].id;
+
+      // Fetch all existing active member phones & emails in this gym for duplicate checking
+      const existingMembersRes = await client.query<{ phone: string; email: string | null }>(
+        `SELECT phone, email FROM members WHERE gym_id = $1 AND deleted_at IS NULL;`,
+        [gymId]
+      );
+      const existingPhones = new Set<string>(existingMembersRes.rows.map((r) => r.phone));
+      const existingEmails = new Set<string>(
+        existingMembersRes.rows.filter((r) => r.email).map((r) => r.email!.toLowerCase())
+      );
+
+      const seenFilePhones = new Set<string>();
+      const seenFileEmails = new Set<string>();
+      const errorsList: PiiFreeCsvError[] = [];
+      let importedCount = 0;
+
+      for (let i = 0; i < parsed.rows.length; i++) {
+        const rowNumber = i + 2; // 1-based row number (row 1 is header)
+        const rowValues = parsed.rows[i];
+        const rowObj: Record<string, string> = {};
+        normalizedHeaders.forEach((header, idx) => {
+          rowObj[header] = rowValues[idx] || '';
+        });
+
+        const validation = validateCsvRow(rowObj, rowNumber);
+        if (!validation.valid) {
+          errorsList.push(...validation.errors);
+          continue;
+        }
+
+        const member = validation.member;
+
+        // Check duplicate within the same CSV file
+        if (seenFilePhones.has(member.phone)) {
+          errorsList.push({
+            row: rowNumber,
+            field: 'phone',
+            code: 'DUPLICATE_PHONE_IN_CSV',
+            message: 'Duplicate phone number found within CSV file'
+          });
+          continue;
+        }
+
+        // Check duplicate with existing members in gym
+        if (existingPhones.has(member.phone)) {
+          errorsList.push({
+            row: rowNumber,
+            field: 'phone',
+            code: 'DUPLICATE_PHONE_IN_GYM',
+            message: 'Phone number already registered to an active member in this gym'
+          });
+          continue;
+        }
+
+        if (member.email) {
+          if (seenFileEmails.has(member.email)) {
+            errorsList.push({
+              row: rowNumber,
+              field: 'email',
+              code: 'DUPLICATE_EMAIL_IN_CSV',
+              message: 'Duplicate email address found within CSV file'
+            });
+            continue;
+          }
+          if (existingEmails.has(member.email)) {
+            errorsList.push({
+              row: rowNumber,
+              field: 'email',
+              code: 'DUPLICATE_EMAIL_IN_GYM',
+              message: 'Email address already registered to an active member in this gym'
+            });
+            continue;
+          }
+        }
+
+        // Generate monotonic member number
+        const seqRes = await client.query<{ generate_next_member_number: string }>(
+          'SELECT generate_next_member_number($1) as generate_next_member_number;',
+          [gymId]
+        );
+        const memberNumber = seqRes.rows[0].generate_next_member_number;
+
+        // Insert valid member
+        await client.query(
+          `INSERT INTO members (gym_id, member_number, first_name, last_name, phone, email, gender, date_of_birth, emergency_contact_name, emergency_contact_phone, status)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'active');`,
+          [
+            gymId,
+            memberNumber,
+            member.firstName,
+            member.lastName,
+            member.phone,
+            member.email,
+            member.gender,
+            member.dateOfBirth,
+            member.emergencyContactName,
+            member.emergencyContactPhone
+          ]
+        );
+
+        seenFilePhones.add(member.phone);
+        existingPhones.add(member.phone);
+        if (member.email) {
+          seenFileEmails.add(member.email);
+          existingEmails.add(member.email);
+        }
+        importedCount++;
+      }
+
+      const finalStatus = importedCount > 0 ? 'completed' : (errorsList.length > 0 ? 'failed' : 'completed');
+
+      const updateJobRes = await client.query(
+        `UPDATE csv_import_jobs
+         SET processed_rows = $1, error_count = $2, errors_json = $3, status = $4, completed_at = CURRENT_TIMESTAMP
+         WHERE id = $5
+         RETURNING *;`,
+        [importedCount, errorsList.length, JSON.stringify(errorsList), finalStatus, jobId]
+      );
+
+      await client.query('COMMIT');
+
+      const raw = updateJobRes.rows[0];
+      const jobRecord = {
+        id: raw.id,
+        gymId: raw.gym_id,
+        fileName: raw.file_name,
+        fileSha256: raw.file_sha256,
+        totalRows: raw.total_rows,
+        processedRows: raw.processed_rows,
+        errorCount: raw.error_count,
+        errorsJson: typeof raw.errors_json === 'string' ? JSON.parse(raw.errors_json) : raw.errors_json,
+        status: raw.status,
+        createdByUserId: raw.created_by_user_id,
+        createdAt: raw.created_at,
+        completedAt: raw.completed_at
+      };
+
+      return reply.send({
+        job: jobRecord,
+        importedCount,
+        errorCount: errorsList.length,
+        totalRows: parsed.rows.length
+      });
+    } catch (err: unknown) {
+      await client.query('ROLLBACK');
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('uq_csv_import_file')) {
+        return reply.status(409).send({ error: 'This CSV file has already been imported for this gym.' });
+      }
+      return reply.status(400).send({ error: msg || 'Failed to process CSV import' });
+    } finally {
+      client.release();
+    }
+  });
+
+  // 18. List CSV import jobs for gym
+  fastify.get<{
+    Params: { gymId: string };
+  }>('/:gymId/members/import-jobs', {
+    preHandler: [authenticateUser, requireTenant]
+  }, async (req, reply) => {
+    const { gymId, userId } = req.tenantContext!;
+    const jobs = await withTenantContext(pool, { gymId, userId }, async (db) => {
+      return db
+        .select()
+        .from(csvImportJobs)
+        .where(eq(csvImportJobs.gymId, gymId))
+        .orderBy(desc(csvImportJobs.createdAt));
+    });
+    return reply.send({ jobs });
+  });
+
+  // 19. Get single CSV import job detail
+  fastify.get<{
+    Params: { gymId: string; jobId: string };
+  }>('/:gymId/members/import-jobs/:jobId', {
+    preHandler: [authenticateUser, requireTenant]
+  }, async (req, reply) => {
+    const { gymId, userId } = req.tenantContext!;
+    const { jobId } = req.params;
+    const [job] = await withTenantContext(pool, { gymId, userId }, async (db) => {
+      return db
+        .select()
+        .from(csvImportJobs)
+        .where(and(eq(csvImportJobs.gymId, gymId), eq(csvImportJobs.id, jobId)));
+    });
+    if (!job) {
+      return reply.status(404).send({ error: 'Import job not found' });
+    }
+    return reply.send({ job });
   });
 };

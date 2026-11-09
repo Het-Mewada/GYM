@@ -997,3 +997,103 @@ export async function rejectRegistrationRequest(
 
   return res.json();
 }
+
+export interface CsvImportJob {
+  id: string;
+  gymId: string;
+  fileName: string;
+  fileSha256: string;
+  totalRows: number;
+  processedRows: number;
+  errorCount: number;
+  errorsJson: Array<{
+    row: number;
+    field: string;
+    code: string;
+    message: string;
+  }>;
+  status: 'pending' | 'processing' | 'completed' | 'failed';
+  createdByUserId: string;
+  createdAt: string;
+  completedAt: string | null;
+}
+
+export interface CsvImportResponse {
+  job: CsvImportJob;
+  importedCount: number;
+  errorCount: number;
+  totalRows: number;
+}
+
+export async function importMembersCsv(
+  gymId: string,
+  file: File,
+  token?: string
+): Promise<CsvImportResponse> {
+  const activeToken = token || (typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined);
+  if (!activeToken) throw new Error('Authentication required');
+
+  const formData = new FormData();
+  formData.append('file', file);
+
+  const url = `${getApiBaseUrl()}/gyms/${gymId}/members/import-csv`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${activeToken}`
+    },
+    body: formData
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(errorBody.error || `Failed to import CSV: ${res.statusText}`);
+  }
+
+  return res.json();
+}
+
+export async function fetchImportJobs(
+  gymId: string,
+  token?: string
+): Promise<{ jobs: CsvImportJob[] }> {
+  const activeToken = token || (typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined);
+  if (!activeToken) throw new Error('Authentication required');
+
+  const url = `${getApiBaseUrl()}/gyms/${gymId}/members/import-jobs`;
+  const res = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${activeToken}`
+    }
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(errorBody.error || `Failed to fetch import jobs: ${res.statusText}`);
+  }
+
+  return res.json();
+}
+
+export async function fetchImportJob(
+  gymId: string,
+  jobId: string,
+  token?: string
+): Promise<{ job: CsvImportJob }> {
+  const activeToken = token || (typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined);
+  if (!activeToken) throw new Error('Authentication required');
+
+  const url = `${getApiBaseUrl()}/gyms/${gymId}/members/import-jobs/${jobId}`;
+  const res = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${activeToken}`
+    }
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(errorBody.error || `Failed to fetch import job: ${res.statusText}`);
+  }
+
+  return res.json();
+}

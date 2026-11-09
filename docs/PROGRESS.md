@@ -62,12 +62,15 @@
   - Replaced legacy notification banners with bottom-right toast system.
   - Comprehensive test suite covering attendance, tenant isolation, and registration requests.
 
-## In Progress
-- [ ] **Phase 3 Slice 5: CSV Member Importer**
-  - Multipart/form-data upload with SHA-256 duplicate file hashing (`uq_csv_import_file_hash`).
-  - Column mapping validation (First Name, Last Name, Phone, Email, Gender, DOB).
-  - Transactional batching with PII-free error collection (`errors_json`).
-  - Web UI for CSV file upload, progress polling, and validation error inspection.
+- [x] **Phase 3 Slice 5: CSV Member Importer**
+  - RFC 4180 CSV parser and normalizer in `@gym/shared` with flexible header mapping and phone/date normalization.
+  - Multipart/form-data & JSON upload backend endpoint (`POST /api/gyms/:gymId/members/import-csv`) with role guard.
+  - Cryptographic duplicate file rejection via SHA-256 hash enforcement (`uq_csv_import_file_hash`).
+  - Monotonic per-gym member sequence assignment (`generate_next_member_number(p_gym_id)`).
+  - PII-free row-by-row error logging stored in `csv_import_jobs.errors_json`.
+  - Past import jobs listing and detail inspection endpoints (`/import-jobs`, `/import-jobs/:jobId`).
+  - Web UI modal in `/members` featuring drag-and-drop dropzone, sample template download, client-side pre-validation preview, batch summary metrics, and full history tab.
+  - 100% test pass rate across unit, integration, route registry, and tenant isolation tests.
 
 ## Blocked
 - None.

@@ -271,6 +271,33 @@ const ROUTE_REGISTRY: RouteDeclaration[] = [
     hasBodyIsolationTest: true,
     hasResourceIdIsolationTest: true,
     notes: 'Reject member registration request'
+  },
+  {
+    method: 'POST',
+    url: '/api/gyms/:gymId/members/import-csv',
+    isTenantScoped: true,
+    hasPathIsolationTest: true,
+    hasBodyIsolationTest: false,
+    hasResourceIdIsolationTest: false,
+    notes: 'Import members via CSV'
+  },
+  {
+    method: 'GET',
+    url: '/api/gyms/:gymId/members/import-jobs',
+    isTenantScoped: true,
+    hasPathIsolationTest: true,
+    hasBodyIsolationTest: false,
+    hasResourceIdIsolationTest: false,
+    notes: 'List CSV import jobs'
+  },
+  {
+    method: 'GET',
+    url: '/api/gyms/:gymId/members/import-jobs/:jobId',
+    isTenantScoped: true,
+    hasPathIsolationTest: true,
+    hasBodyIsolationTest: false,
+    hasResourceIdIsolationTest: true,
+    notes: 'Get single CSV import job detail'
   }
 ];
 
@@ -751,6 +778,31 @@ describe('Route Registry & Cross-Tenant Isolation Enforcement', () => {
       payload: { reason: 'Cross-tenant path attempt' }
     });
     expect(rejectReqPathRes.statusCode).toBe(403);
+
+    // 26. POST /api/gyms/:gymId/members/import-csv
+    const importCsvPathRes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymAId}/members/import-csv`,
+      headers: { authorization: `Bearer ${ownerBToken}` },
+      payload: { csvContent: 'First Name,Phone\nTest,9876543210' }
+    });
+    expect(importCsvPathRes.statusCode).toBe(403);
+
+    // 27. GET /api/gyms/:gymId/members/import-jobs
+    const listImportJobsPathRes = await app.inject({
+      method: 'GET',
+      url: `/api/gyms/${gymAId}/members/import-jobs`,
+      headers: { authorization: `Bearer ${ownerBToken}` }
+    });
+    expect(listImportJobsPathRes.statusCode).toBe(403);
+
+    // 28. GET /api/gyms/:gymId/members/import-jobs/:jobId
+    const getImportJobPathRes = await app.inject({
+      method: 'GET',
+      url: `/api/gyms/${gymAId}/members/import-jobs/${crypto.randomUUID()}`,
+      headers: { authorization: `Bearer ${ownerBToken}` }
+    });
+    expect(getImportJobPathRes.statusCode).toBe(403);
   });
 
   // Verification of Body Isolation (Payload injection with foreign gym ID)
@@ -1070,5 +1122,14 @@ describe('Route Registry & Cross-Tenant Isolation Enforcement', () => {
     });
     expect(rejectResIdRes.statusCode).toBe(404);
     expect(JSON.parse(rejectResIdRes.payload).error).toMatch(/not found/i);
+
+    // GET /api/gyms/:gymId/members/import-jobs/:jobId with foreign job ID
+    const getJobResIdRes = await app.inject({
+      method: 'GET',
+      url: `/api/gyms/${gymAId}/members/import-jobs/${crypto.randomUUID()}`,
+      headers: { authorization: `Bearer ${ownerAToken}` }
+    });
+    expect(getJobResIdRes.statusCode).toBe(404);
+    expect(JSON.parse(getJobResIdRes.payload).error).toMatch(/not found/i);
   });
 });
