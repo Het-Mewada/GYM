@@ -1,10 +1,11 @@
 import type { FastifyPluginAsync } from 'fastify';
 import type pg from 'pg';
 import crypto from 'node:crypto';
-import { withTenantContext, members, memberRegistrationRequests, membershipPlans, subscriptions, paymentTransactions, attendanceLogs, csvImportJobs, eq, and, or, ilike, isNull, desc, sql } from '@gym/db';
-import { PaymentRecordSchema, RefundRecordSchema, AttendanceCheckInSchema, AttendanceVoidSchema, MemberRegistrationRejectSchema, parseCsv, normalizeCsvHeader, validateCsvRow, type PiiFreeCsvError } from '@gym/shared';
+import { withTenantContext, members, memberRegistrationRequests, membershipPlans, subscriptions, paymentTransactions, attendanceLogs, csvImportJobs, notificationLogs, tenants, eq, and, or, ilike, isNull, desc, sql } from '@gym/db';
+import { PaymentRecordSchema, RefundRecordSchema, AttendanceCheckInSchema, AttendanceVoidSchema, MemberRegistrationRejectSchema, SendNotificationSchema, type SendNotificationInput, parseCsv, normalizeCsvHeader, validateCsvRow, type PiiFreeCsvError } from '@gym/shared';
 import { authenticateUser, createRequireTenantMembership } from '../middleware/auth.js';
 import { generateRandomToken, hashToken, hashPassword } from '../auth/crypto.js';
+import { sendEmail, renderEmailTemplate, generateWhatsAppLink } from '../notifications/index.js';
 
 interface GymRoutesOptions {
   pool: pg.Pool;
@@ -2328,5 +2329,204 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
       return reply.status(404).send({ error: 'Import job not found' });
     }
     return reply.send({ job });
+  });
+
+  // 20. Send notification to member (Resend Email or WhatsApp Direct Click Link)
+  fastify.post<{
+    Params: { gymId: string; memberId: string };
+    Body: SendNotificationInput & {
+      receiptNumber?: string;
+      amountCents?: number;
+      planName?: string;
+    };
+  }>('/:gymId/members/:memberId/notify', {
+    preHandler: [authenticateUser, requireTenant]
+  }, async (req, reply) => {
+    const { gymId, userId } = req.tenantContext!;
+    const { memberId } = req.params;
+
+    const parseRes = SendNotificationSchema.safeParse(req.body);
+    if (!parseRes.success) {
+      return reply.status(400).send({
+        error: parseRes.error.issues[0]?.message || 'Invalid notification request body'
+      });
+    }
+
+    const { channel, template, customMessage } = parseRes.data;
+    const { receiptNumber, amountCents, planName } = req.body || {};
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query("SELECT set_config('app.gym_id', $1, true);", [gymId]);
+      await client.query("SELECT set_config('app.user_id', $1, true);", [userId]);
+
+      // 1. Fetch member details
+      const memberRes = await client.query<{
+        id: string;
+        member_number: string;
+        first_name: string;
+        last_name: string | null;
+        phone: string;
+        email: string | null;
+      }>(
+        'SELECT id, member_number, first_name, last_name, phone, email FROM members WHERE gym_id = $1 AND id = $2 AND deleted_at IS NULL;',
+        [gymId, memberId]
+      );
+
+      if (memberRes.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return reply.status(404).send({ error: 'Member not found in this gym' });
+      }
+
+      const member = memberRes.rows[0];
+      const memberFullName = `${member.first_name}${member.last_name ? ' ' + member.last_name : ''}`.trim();
+
+      // 2. Fetch gym tenant name
+      const tenantRes = await client.query<{ name: string }>(
+        'SELECT name FROM tenants WHERE id = $1;',
+        [gymId]
+      );
+      const gymName = tenantRes.rows[0]?.name || 'Gym';
+
+      const notifContext = {
+        gymName,
+        memberName: memberFullName,
+        memberNumber: member.member_number,
+        memberPhone: member.phone,
+        memberEmail: member.email || undefined,
+        receiptNumber,
+        amountCents,
+        planName,
+        customMessage
+      };
+
+      if (channel === 'email') {
+        if (!member.email) {
+          await client.query('ROLLBACK');
+          return reply.status(400).send({
+            error: 'Member does not have an email address on file'
+          });
+        }
+
+        const emailContent = renderEmailTemplate(template, notifContext);
+        const emailResult = await sendEmail({
+          to: member.email,
+          subject: emailContent.subject,
+          html: emailContent.html
+        });
+
+        const status = emailResult.success ? 'sent' : 'failed';
+        const logRes = await client.query<{ id: string; sent_at: string }>(
+          `INSERT INTO notification_logs (gym_id, member_id, channel, template, status, error_message)
+           VALUES ($1, $2, 'email', $3, $4, $5)
+           RETURNING id, sent_at;`,
+          [gymId, memberId, template, status, emailResult.error || null]
+        );
+
+        await client.query('COMMIT');
+
+        return reply.send({
+          success: emailResult.success,
+          channel: 'email',
+          template,
+          logId: logRes.rows[0].id,
+          sentAt: logRes.rows[0].sent_at,
+          status,
+          error: emailResult.error
+        });
+      } else {
+        // channel === 'whatsapp_click'
+        const waData = generateWhatsAppLink(template, notifContext);
+
+        const logRes = await client.query<{ id: string; sent_at: string }>(
+          `INSERT INTO notification_logs (gym_id, member_id, channel, template, status)
+           VALUES ($1, $2, 'whatsapp_click', $3, 'clicked')
+           RETURNING id, sent_at;`,
+          [gymId, memberId, template]
+        );
+
+        await client.query('COMMIT');
+
+        return reply.send({
+          success: true,
+          channel: 'whatsapp_click',
+          template,
+          logId: logRes.rows[0].id,
+          sentAt: logRes.rows[0].sent_at,
+          status: 'clicked',
+          url: waData.url,
+          text: waData.text
+        });
+      }
+    } catch (err: unknown) {
+      await client.query('ROLLBACK');
+      const msg = err instanceof Error ? err.message : String(err);
+      return reply.status(400).send({ error: msg || 'Failed to send notification' });
+    } finally {
+      client.release();
+    }
+  });
+
+  // 21. Get member notification history
+  fastify.get<{
+    Params: { gymId: string; memberId: string };
+  }>('/:gymId/members/:memberId/notifications', {
+    preHandler: [authenticateUser, requireTenant]
+  }, async (req, reply) => {
+    const { gymId, userId } = req.tenantContext!;
+    const { memberId } = req.params;
+
+    const notifs = await withTenantContext(pool, { gymId, userId }, async (db) => {
+      // First guard against cross-tenant member access
+      const [member] = await db
+        .select({ id: members.id })
+        .from(members)
+        .where(and(eq(members.gymId, gymId), eq(members.id, memberId), isNull(members.deletedAt)));
+
+      if (!member) {
+        return null;
+      }
+
+      return db
+        .select()
+        .from(notificationLogs)
+        .where(and(eq(notificationLogs.gymId, gymId), eq(notificationLogs.memberId, memberId)))
+        .orderBy(desc(notificationLogs.sentAt));
+    });
+
+    if (notifs === null) {
+      return reply.status(404).send({ error: 'Member not found in this gym' });
+    }
+
+    return reply.send({ notifications: notifs });
+  });
+
+  // 22. List all gym notifications
+  fastify.get<{
+    Params: { gymId: string };
+    Querystring: { channel?: string; limit?: string };
+  }>('/:gymId/notifications', {
+    preHandler: [authenticateUser, requireTenant]
+  }, async (req, reply) => {
+    const { gymId, userId } = req.tenantContext!;
+    const { channel, limit: rawLimit } = req.query;
+    const limit = Math.min(Math.max(parseInt(rawLimit || '50', 10) || 50, 1), 100);
+
+    const conditions = [eq(notificationLogs.gymId, gymId)];
+    if (channel && (channel === 'email' || channel === 'whatsapp_click')) {
+      conditions.push(eq(notificationLogs.channel, channel));
+    }
+
+    const notifs = await withTenantContext(pool, { gymId, userId }, async (db) => {
+      return db
+        .select()
+        .from(notificationLogs)
+        .where(and(...conditions))
+        .orderBy(desc(notificationLogs.sentAt))
+        .limit(limit);
+    });
+
+    return reply.send({ notifications: notifs });
   });
 };

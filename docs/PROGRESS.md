@@ -72,8 +72,17 @@
   - Web UI modal in `/members` featuring drag-and-drop dropzone, sample template download, client-side pre-validation preview, batch summary metrics, and full history tab.
   - 100% test pass rate across unit, integration, route registry, and tenant isolation tests.
 
+- [x] **Phase 3 Slice 6: Automated Notifications & Communication Triggers**
+  - Resend email integration with fallback mock transport for development and tests.
+  - Responsive HTML branded email templates (`welcome_enrollment`, `payment_receipt`, `expiry_reminder`, `renewal_confirmation`, `membership_approved`).
+  - WhatsApp Business click-to-chat deep link generator (`https://wa.me/...`) with pre-filled message text.
+  - Append-only notification audit logging (`notification_logs`) with tamper-proof delivery status (`sent`, `clicked`, `failed`).
+  - Endpoints: `POST /api/gyms/:gymId/members/:memberId/notify`, `GET /api/gyms/:gymId/members/:memberId/notifications`, `GET /api/gyms/:gymId/notifications`.
+  - Frontend Web UI: `NotificationModal` component integrated into member directory rows and payment tax receipts with live message preview and communication history tab.
+  - 100% test coverage including tenant isolation, email requirement guards, and route registry verification.
+
 ## Blocked
 - None.
 
 ## Next Up
-- Phase 3 Slice 6: Automated Notifications & Communication Triggers (Resend email, WhatsApp direct click links).
+- Phase 3 Slice 7: Audit Logs, Platform Super Admin Metrics & Operational Hardening.

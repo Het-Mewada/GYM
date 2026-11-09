@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { OVERRIDE_REASONS, PAYMENT_METHODS, ATTENDANCE_METHODS } from '../constants/index.js';
+import { OVERRIDE_REASONS, PAYMENT_METHODS, ATTENDANCE_METHODS, NOTIFICATION_CHANNELS, NOTIFICATION_TEMPLATES } from '../constants/index.js';
 
 export const PhoneSchema = z.string().regex(/^\+[1-9]\d{6,14}$/, {
   message: 'Phone number must be a valid E.164 formatted string with leading +'
@@ -118,4 +118,12 @@ export const MemberRegistrationRejectSchema = z.object({
 
 export type MemberRegistrationRequestInput = z.infer<typeof MemberRegistrationRequestSchema>;
 export type MemberRegistrationRejectInput = z.infer<typeof MemberRegistrationRejectSchema>;
+
+export const SendNotificationSchema = z.object({
+  channel: z.enum(NOTIFICATION_CHANNELS),
+  template: z.enum(NOTIFICATION_TEMPLATES),
+  customMessage: z.string().max(1000).optional().nullable()
+});
+
+export type SendNotificationInput = z.infer<typeof SendNotificationSchema>;
 

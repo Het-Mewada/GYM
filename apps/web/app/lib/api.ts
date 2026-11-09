@@ -1097,3 +1097,107 @@ export async function fetchImportJob(
 
   return res.json();
 }
+
+export interface NotificationLogItem {
+  id: string;
+  gymId: string;
+  memberId: string;
+  channel: 'email' | 'whatsapp_click';
+  template: string;
+  status: 'sent' | 'clicked' | 'failed';
+  errorMessage: string | null;
+  sentAt: string;
+}
+
+export interface SendNotificationResponse {
+  success: boolean;
+  channel: 'email' | 'whatsapp_click';
+  template: string;
+  logId: string;
+  sentAt: string;
+  status: 'sent' | 'clicked' | 'failed';
+  url?: string;
+  text?: string;
+  error?: string;
+}
+
+export async function sendMemberNotification(
+  gymId: string,
+  memberId: string,
+  input: {
+    channel: 'email' | 'whatsapp_click';
+    template: 'welcome_enrollment' | 'payment_receipt' | 'expiry_reminder' | 'renewal_confirmation' | 'membership_approved';
+    customMessage?: string | null;
+    receiptNumber?: string;
+    amountCents?: number;
+    planName?: string;
+  },
+  token?: string
+): Promise<SendNotificationResponse> {
+  const activeToken = token || (typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined);
+  if (!activeToken) throw new Error('Authentication required');
+
+  const url = `${getApiBaseUrl()}/gyms/${gymId}/members/${memberId}/notify`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${activeToken}`
+    },
+    body: JSON.stringify(input)
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(errorBody.error || `Failed to send notification: ${res.statusText}`);
+  }
+
+  return res.json();
+}
+
+export async function fetchMemberNotifications(
+  gymId: string,
+  memberId: string,
+  token?: string
+): Promise<{ notifications: NotificationLogItem[] }> {
+  const activeToken = token || (typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined);
+  if (!activeToken) throw new Error('Authentication required');
+
+  const url = `${getApiBaseUrl()}/gyms/${gymId}/members/${memberId}/notifications`;
+  const res = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${activeToken}`
+    }
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(errorBody.error || `Failed to fetch member notifications: ${res.statusText}`);
+  }
+
+  return res.json();
+}
+
+export async function fetchGymNotifications(
+  gymId: string,
+  channel?: string,
+  token?: string
+): Promise<{ notifications: NotificationLogItem[] }> {
+  const activeToken = token || (typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined);
+  if (!activeToken) throw new Error('Authentication required');
+
+  const q = channel ? `?channel=${channel}` : '';
+  const url = `${getApiBaseUrl()}/gyms/${gymId}/notifications${q}`;
+  const res = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${activeToken}`
+    }
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(errorBody.error || `Failed to fetch gym notifications: ${res.statusText}`);
+  }
+
+  return res.json();
+}

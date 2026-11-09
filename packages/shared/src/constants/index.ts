@@ -28,3 +28,18 @@ export type OverrideReason = (typeof OVERRIDE_REASONS)[number];
 export const DEFAULT_TIMEZONE = 'Asia/Kolkata';
 export const DEFAULT_CURRENCY = 'INR';
 export const DEFAULT_COUNTRY = 'IN';
+
+export const NOTIFICATION_CHANNELS = ['email', 'whatsapp_click'] as const;
+export type NotificationChannel = (typeof NOTIFICATION_CHANNELS)[number];
+
+export const NOTIFICATION_TEMPLATES = [
+  'welcome_enrollment',
+  'payment_receipt',
+  'expiry_reminder',
+  'renewal_confirmation',
+  'membership_approved'
+] as const;
+export type NotificationTemplate = (typeof NOTIFICATION_TEMPLATES)[number];
+
+export const NOTIFICATION_STATUSES = ['sent', 'clicked', 'failed'] as const;
+export type NotificationStatus = (typeof NOTIFICATION_STATUSES)[number];

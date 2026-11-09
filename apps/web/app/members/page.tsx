@@ -27,6 +27,7 @@ import { Navbar } from '../components/Navbar';
 import { PhoneInput, parsePhone } from '../components/PhoneInput';
 import { TenantQrModal } from '../components/TenantQrModal';
 import { CsvImportModal } from '../components/CsvImportModal';
+import { NotificationModal } from '../components/NotificationModal';
 
 export default function MembersPage() {
   const router = useRouter();
@@ -48,6 +49,8 @@ export default function MembersPage() {
   const [activeTab, setActiveTab] = useState<'directory' | 'requests'>('directory');
   const [isQrModalOpen, setIsQrModalOpen] = useState(false);
   const [isCsvModalOpen, setIsCsvModalOpen] = useState(false);
+  const [notifyMember, setNotifyMember] = useState<Member | null>(null);
+  const [isNotifyModalOpen, setIsNotifyModalOpen] = useState(false);
   const [pendingRequests, setPendingRequests] = useState<MemberRegistrationRequest[]>([]);
   const [isLoadingRequests, setIsLoadingRequests] = useState(false);
   const [approvingId, setApprovingId] = useState<string | null>(null);
@@ -1039,6 +1042,20 @@ export default function MembersPage() {
                         </button>
                         <button
                           type="button"
+                          data-testid={`notify-member-${member.id}`}
+                          onClick={() => {
+                            setNotifyMember(member);
+                            setIsNotifyModalOpen(true);
+                          }}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border border-neutral-700 transition cursor-pointer"
+                        >
+                          <svg className="w-3.5 h-3.5 text-emerald-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" />
+                          </svg>
+                          Notify
+                        </button>
+                        <button
+                          type="button"
                           data-testid={`edit-member-${member.id}`}
                           onClick={() => handleOpenEditModal(member)}
                           className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border border-neutral-700 transition cursor-pointer"
@@ -1862,6 +1879,17 @@ export default function MembersPage() {
         onClose={() => setIsCsvModalOpen(false)}
         gymId={gymId}
         onImportSuccess={loadMembers}
+      />
+
+      {/* Member Notification Modal */}
+      <NotificationModal
+        isOpen={isNotifyModalOpen}
+        onClose={() => {
+          setIsNotifyModalOpen(false);
+          setNotifyMember(null);
+        }}
+        gymId={gymId}
+        member={notifyMember}
       />
     </div>
   );

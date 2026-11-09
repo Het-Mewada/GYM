@@ -13,6 +13,7 @@ import {
 } from '../lib/api';
 import { Navbar } from '../components/Navbar';
 import { useToast } from '../components/Toast';
+import { NotificationModal } from '../components/NotificationModal';
 
 export default function PaymentsPage() {
   const router = useRouter();
@@ -33,6 +34,7 @@ export default function PaymentsPage() {
   const [isCollectModalOpen, setIsCollectModalOpen] = useState<boolean>(false);
   const [selectedReceipt, setSelectedReceipt] = useState<PaymentItem | null>(null);
   const [refundTargetPayment, setRefundTargetPayment] = useState<PaymentItem | null>(null);
+  const [isReceiptNotifyOpen, setIsReceiptNotifyOpen] = useState<boolean>(false);
 
   // Collect Payment Form state
   const [payMemberId, setPayMemberId] = useState<string>('');
@@ -821,6 +823,16 @@ export default function PaymentsPage() {
 
             <div className="pt-2 flex justify-end gap-3">
               <button
+                type="button"
+                onClick={() => setIsReceiptNotifyOpen(true)}
+                className="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-black font-semibold text-xs transition flex items-center gap-1.5 cursor-pointer shadow-lg shadow-emerald-950/40"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" />
+                </svg>
+                Send via WhatsApp / Email
+              </button>
+              <button
                 onClick={() => setSelectedReceipt(null)}
                 className="px-5 py-2 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-white font-medium text-xs transition cursor-pointer"
               >
@@ -829,6 +841,21 @@ export default function PaymentsPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Payment Receipt Notification Modal */}
+      {selectedReceipt && (
+        <NotificationModal
+          isOpen={isReceiptNotifyOpen}
+          onClose={() => setIsReceiptNotifyOpen(false)}
+          gymId={gymId}
+          member={members.find((m) => m.id === selectedReceipt.memberId) || null}
+          defaultTemplate="payment_receipt"
+          extraContext={{
+            receiptNumber: selectedReceipt.receiptNumber,
+            amountCents: Math.abs(Number(selectedReceipt.amountCents))
+          }}
+        />
       )}
     </div>
   );

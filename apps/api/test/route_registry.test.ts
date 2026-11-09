@@ -298,6 +298,33 @@ const ROUTE_REGISTRY: RouteDeclaration[] = [
     hasBodyIsolationTest: false,
     hasResourceIdIsolationTest: true,
     notes: 'Get single CSV import job detail'
+  },
+  {
+    method: 'POST',
+    url: '/api/gyms/:gymId/members/:memberId/notify',
+    isTenantScoped: true,
+    hasPathIsolationTest: true,
+    hasBodyIsolationTest: false,
+    hasResourceIdIsolationTest: true,
+    notes: 'Send notification to member'
+  },
+  {
+    method: 'GET',
+    url: '/api/gyms/:gymId/members/:memberId/notifications',
+    isTenantScoped: true,
+    hasPathIsolationTest: true,
+    hasBodyIsolationTest: false,
+    hasResourceIdIsolationTest: true,
+    notes: 'Get member notification history'
+  },
+  {
+    method: 'GET',
+    url: '/api/gyms/:gymId/notifications',
+    isTenantScoped: true,
+    hasPathIsolationTest: true,
+    hasBodyIsolationTest: false,
+    hasResourceIdIsolationTest: false,
+    notes: 'List gym notifications'
   }
 ];
 
@@ -803,6 +830,31 @@ describe('Route Registry & Cross-Tenant Isolation Enforcement', () => {
       headers: { authorization: `Bearer ${ownerBToken}` }
     });
     expect(getImportJobPathRes.statusCode).toBe(403);
+
+    // 29. POST /api/gyms/:gymId/members/:memberId/notify
+    const notifyPathRes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymAId}/members/${memberAId}/notify`,
+      headers: { authorization: `Bearer ${ownerBToken}` },
+      payload: { channel: 'whatsapp_click', template: 'welcome_enrollment' }
+    });
+    expect(notifyPathRes.statusCode).toBe(403);
+
+    // 30. GET /api/gyms/:gymId/members/:memberId/notifications
+    const memberNotifsPathRes = await app.inject({
+      method: 'GET',
+      url: `/api/gyms/${gymAId}/members/${memberAId}/notifications`,
+      headers: { authorization: `Bearer ${ownerBToken}` }
+    });
+    expect(memberNotifsPathRes.statusCode).toBe(403);
+
+    // 31. GET /api/gyms/:gymId/notifications
+    const gymNotifsPathRes = await app.inject({
+      method: 'GET',
+      url: `/api/gyms/${gymAId}/notifications`,
+      headers: { authorization: `Bearer ${ownerBToken}` }
+    });
+    expect(gymNotifsPathRes.statusCode).toBe(403);
   });
 
   // Verification of Body Isolation (Payload injection with foreign gym ID)
@@ -1131,5 +1183,24 @@ describe('Route Registry & Cross-Tenant Isolation Enforcement', () => {
     });
     expect(getJobResIdRes.statusCode).toBe(404);
     expect(JSON.parse(getJobResIdRes.payload).error).toMatch(/not found/i);
+
+    // POST /api/gyms/:gymId/members/:memberId/notify where member belongs to Gym B
+    const notifyResIdRes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymAId}/members/${memberBId}/notify`,
+      headers: { authorization: `Bearer ${ownerAToken}` },
+      payload: { channel: 'whatsapp_click', template: 'welcome_enrollment' }
+    });
+    expect(notifyResIdRes.statusCode).toBe(404);
+    expect(JSON.parse(notifyResIdRes.payload).error).toMatch(/not found in this gym/i);
+
+    // GET /api/gyms/:gymId/members/:memberId/notifications where member belongs to Gym B
+    const getMemberNotifsResIdRes = await app.inject({
+      method: 'GET',
+      url: `/api/gyms/${gymAId}/members/${memberBId}/notifications`,
+      headers: { authorization: `Bearer ${ownerAToken}` }
+    });
+    expect(getMemberNotifsResIdRes.statusCode).toBe(404);
+    expect(JSON.parse(getMemberNotifsResIdRes.payload).error).toMatch(/not found in this gym/i);
   });
 });
