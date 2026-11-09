@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { buildApp } from '../src/app.js';
 import type { FastifyInstance } from 'fastify';
-import { createPool } from '@gym/db';
+import { createPool, cleanupTenant } from '@gym/db';
 import { hashPassword } from '../src/auth/crypto.js';
 import type pg from 'pg';
 
@@ -88,6 +88,8 @@ describe('HTTP Cross-Tenant Security Suite (Path IDs & Body IDs)', () => {
   });
 
   afterAll(async () => {
+    if (gym1Id) await cleanupTenant(pool, gym1Id);
+    if (gym2Id) await cleanupTenant(pool, gym2Id);
     await app.close();
   });
 

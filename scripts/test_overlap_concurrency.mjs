@@ -237,6 +237,14 @@ async function runTest() {
     } finally {
       restoreClient.release();
     }
+    // Clean up provisioned test tenant
+    if (gymId) {
+      try {
+        await pool.query('SELECT cleanup_tenant($1);', [gymId]);
+      } catch (e) {
+        console.error('Error cleaning up test gym in finally:', e);
+      }
+    }
     await adminPool.end();
     await pool.end();
   }

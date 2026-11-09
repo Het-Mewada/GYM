@@ -86,6 +86,18 @@ export function Navbar({
 
       if (initialGyms.length > 0) {
         setAccessibleGyms(initialGyms);
+        if (!storedGymId) {
+          const firstGym = initialGyms[0];
+          localStorage.setItem('gym_id', firstGym.id);
+          localStorage.setItem('gym_name', firstGym.name);
+          if (firstGym.slug) localStorage.setItem('gym_slug', firstGym.slug);
+          if (firstGym.role) localStorage.setItem('user_role', firstGym.role);
+          setGymId(firstGym.id);
+          setGymName(firstGym.name);
+          if (onGymChange) {
+            onGymChange(firstGym.id, firstGym.name);
+          }
+        }
       }
 
       // Fetch fresh list of gyms from platform
@@ -111,6 +123,25 @@ export function Navbar({
               });
               return Array.from(map.values());
             });
+
+            // Ensure active gym is persisted if not set
+            const currentGymId = localStorage.getItem('gym_id');
+            if (!currentGymId && res.tenants.length > 0) {
+              const defaultTenant = res.tenants[0];
+              localStorage.setItem('gym_id', defaultTenant.id);
+              localStorage.setItem('gym_name', defaultTenant.name);
+              if (defaultTenant.slug) localStorage.setItem('gym_slug', defaultTenant.slug);
+              const tRole = (defaultTenant as unknown as { role?: string }).role || (isSuper ? 'owner' : undefined);
+              if (tRole) localStorage.setItem('user_role', tRole);
+              setGymId(defaultTenant.id);
+              setGymName(defaultTenant.name);
+              if (onGymChange) {
+                onGymChange(defaultTenant.id, defaultTenant.name);
+              }
+              window.dispatchEvent(new CustomEvent('gym-changed', {
+                detail: { gymId: defaultTenant.id, gymName: defaultTenant.name }
+              }));
+            }
           }
         })
         .catch(() => {
@@ -161,8 +192,17 @@ export function Navbar({
     if (typeof window !== 'undefined') {
       localStorage.setItem('gym_id', newGymId);
       localStorage.setItem('gym_name', newGymName);
+      const matchedGym = accessibleGyms.find((g) => g.id === newGymId);
+      if (matchedGym?.role) {
+        localStorage.setItem('user_role', matchedGym.role);
+      }
+      if (matchedGym?.slug) {
+        localStorage.setItem('gym_slug', matchedGym.slug);
+      }
       // Dispatch custom event for any listeners
-      window.dispatchEvent(new CustomEvent('gym-changed', { detail: { gymId: newGymId, gymName: newGymName } }));
+      window.dispatchEvent(new CustomEvent('gym-changed', {
+        detail: { gymId: newGymId, gymName: newGymName, gymSlug: matchedGym?.slug }
+      }));
     }
     setGymId(newGymId);
     setGymName(newGymName);
@@ -232,10 +272,12 @@ export function Navbar({
               </span>
             </Link>
 
-            <span className="text-neutral-600">/</span>
+            {isAuthenticated && (
+              <>
+                <span className="text-neutral-600">/</span>
 
-            {/* Gym Selector Dropdown */}
-            <div className="relative" ref={dropdownRef}>
+                {/* Gym Selector Dropdown */}
+                <div className="relative" ref={dropdownRef}>
               <button
                 type="button"
                 data-testid="navbar-gym-selector-button"
@@ -344,6 +386,8 @@ export function Navbar({
                 </div>
               )}
             </div>
+          </>
+        )}
           </div>
 
           {/* Right: Nav Links + User Auth Status */}
@@ -359,46 +403,50 @@ export function Navbar({
               >
                 Overview
               </Link>
-              <Link
-                href="/members"
-                className={
-                  activePage === 'members'
-                    ? 'text-emerald-400 font-semibold border-b-2 border-emerald-400 pb-1'
-                    : 'text-neutral-400 hover:text-white transition'
-                }
-              >
-                Members
-              </Link>
-              <Link
-                href="/plans"
-                className={
-                  activePage === 'plans'
-                    ? 'text-emerald-400 font-semibold border-b-2 border-emerald-400 pb-1'
-                    : 'text-neutral-400 hover:text-white transition'
-                }
-              >
-                Plans
-              </Link>
-              <Link
-                href="/payments"
-                className={
-                  activePage === 'payments'
-                    ? 'text-emerald-400 font-semibold border-b-2 border-emerald-400 pb-1'
-                    : 'text-neutral-400 hover:text-white transition'
-                }
-              >
-                Payments
-              </Link>
-              <Link
-                href="/attendance"
-                className={
-                  activePage === 'attendance'
-                    ? 'text-emerald-400 font-semibold border-b-2 border-emerald-400 pb-1'
-                    : 'text-neutral-400 hover:text-white transition'
-                }
-              >
-                Attendance
-              </Link>
+              {isAuthenticated && (
+                <>
+                  <Link
+                    href="/members"
+                    className={
+                      activePage === 'members'
+                        ? 'text-emerald-400 font-semibold border-b-2 border-emerald-400 pb-1'
+                        : 'text-neutral-400 hover:text-white transition'
+                    }
+                  >
+                    Members
+                  </Link>
+                  <Link
+                    href="/plans"
+                    className={
+                      activePage === 'plans'
+                        ? 'text-emerald-400 font-semibold border-b-2 border-emerald-400 pb-1'
+                        : 'text-neutral-400 hover:text-white transition'
+                    }
+                  >
+                    Plans
+                  </Link>
+                  <Link
+                    href="/payments"
+                    className={
+                      activePage === 'payments'
+                        ? 'text-emerald-400 font-semibold border-b-2 border-emerald-400 pb-1'
+                        : 'text-neutral-400 hover:text-white transition'
+                    }
+                  >
+                    Payments
+                  </Link>
+                  <Link
+                    href="/attendance"
+                    className={
+                      activePage === 'attendance'
+                        ? 'text-emerald-400 font-semibold border-b-2 border-emerald-400 pb-1'
+                        : 'text-neutral-400 hover:text-white transition'
+                    }
+                  >
+                    Attendance
+                  </Link>
+                </>
+              )}
               {isSuperAdmin && (
                 <Link
                   href="/platform/tenants"

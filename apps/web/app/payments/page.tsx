@@ -1,11 +1,13 @@
 'use client';
 
 import React, { useState, useEffect, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
 import {
   type Member,
   type PaymentItem,
   fetchMembers,
   fetchPayments,
+  fetchPlatformTenants,
   recordPayment,
   refundPayment
 } from '../lib/api';
@@ -13,11 +15,15 @@ import { Navbar } from '../components/Navbar';
 import { useToast } from '../components/Toast';
 
 export default function PaymentsPage() {
+  const router = useRouter();
   const toast = useToast();
 
   const [gymId, setGymId] = useState<string>('');
   const [gymName, setGymName] = useState<string | null>(null);
 
+  const [isCheckingAuth, setIsCheckingAuth] = useState<boolean>(true);
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [isInitialLoadDone, setIsInitialLoadDone] = useState<boolean>(false);
   const [payments, setPayments] = useState<PaymentItem[]>([]);
   const [members, setMembers] = useState<Member[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
@@ -62,58 +68,68 @@ export default function PaymentsPage() {
       setError(err instanceof Error ? err.message : 'Failed to load payments ledger');
     } finally {
       setIsLoading(false);
+      setIsInitialLoadDone(true);
     }
   }, [filterMemberId]);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
       const token = localStorage.getItem('access_token');
+      if (!token) {
+        setIsAuthenticated(false);
+        setIsCheckingAuth(false);
+        setIsLoading(false);
+        setIsInitialLoadDone(true);
+        router.replace('/');
+        return;
+      }
+
+      setIsAuthenticated(true);
+      setIsCheckingAuth(false);
+
       const storedGymId = localStorage.getItem('gym_id');
       const storedGymName = localStorage.getItem('gym_name');
 
-      if (token) {
-        if (storedGymId) setGymId(storedGymId);
-        if (storedGymName) setGymName(storedGymName);
+      if (storedGymId) setGymId(storedGymId);
+      if (storedGymName) setGymName(storedGymName);
 
-        if (storedGymId) {
-          loadData(storedGymId, token);
-        } else {
-          setIsLoading(false);
-        }
+      if (storedGymId) {
+        loadData(storedGymId, token);
       } else {
-        // Client / preview mode
-        setIsLoading(false);
-
-        // Load preview members if available
-        const localMembersStr = localStorage.getItem('local_preview_members');
-        if (localMembersStr) {
-          try {
-            setMembers(JSON.parse(localMembersStr));
-          } catch { /* ignore */ }
-        } else {
-          setMembers([
-            {
-              id: 'mem-preview-1',
-              gymId: 'local-gym',
-              memberNumber: 'MEM-00001',
-              firstName: 'Kavita',
-              lastName: 'Patel',
-              phone: '+919881234567',
-              email: 'kavita@example.com',
-              gender: 'female',
-              dateOfBirth: null,
-              emergencyContactName: null,
-              emergencyContactPhone: null,
-              status: 'active',
-              joinedDate: new Date().toISOString().split('T')[0],
-              createdAt: new Date().toISOString(),
-              updatedAt: new Date().toISOString()
+        setIsLoading(true);
+        fetchPlatformTenants(token)
+          .then((res) => {
+            if (res && Array.isArray(res.tenants) && res.tenants.length > 0) {
+              const defaultTenant = res.tenants[0];
+              localStorage.setItem('gym_id', defaultTenant.id);
+              localStorage.setItem('gym_name', defaultTenant.name);
+              setGymId(defaultTenant.id);
+              setGymName(defaultTenant.name);
+              loadData(defaultTenant.id, token);
+            } else {
+              setIsLoading(false);
+              setIsInitialLoadDone(true);
             }
-          ]);
-        }
+          })
+          .catch(() => {
+            setIsLoading(false);
+            setIsInitialLoadDone(true);
+          });
       }
+
+      const handleGymChangeEvent = (e: Event) => {
+        const customEvent = e as CustomEvent<{ gymId: string; gymName: string }>;
+        if (customEvent.detail?.gymId) {
+          setGymId(customEvent.detail.gymId);
+          setGymName(customEvent.detail.gymName);
+          loadData(customEvent.detail.gymId, token);
+        }
+      };
+
+      window.addEventListener('gym-changed', handleGymChangeEvent);
+      return () => window.removeEventListener('gym-changed', handleGymChangeEvent);
     }
-  }, [loadData]);
+  }, [loadData, router]);
 
   const handleOpenCollectModal = () => {
     setPayMemberId(members[0]?.id || '');
@@ -286,6 +302,15 @@ export default function PaymentsPage() {
 
   const netRevenueCents = totalCollectedCents - totalRefundedCents;
 
+  if (isCheckingAuth || !isAuthenticated) {
+    return (
+      <div className="min-h-screen bg-neutral-950 flex flex-col items-center justify-center space-y-4">
+        <div className="w-8 h-8 rounded-full border-2 border-emerald-500 border-t-transparent animate-spin" />
+        <p className="text-xs text-neutral-400 font-medium">Checking authentication...</p>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-neutral-950 text-neutral-100 font-sans selection:bg-emerald-500 selection:text-black flex flex-col">
       <Navbar
@@ -392,8 +417,11 @@ export default function PaymentsPage() {
             <span className="text-xs text-neutral-500">Append-only • Non-destructive</span>
           </div>
 
-          {isLoading ? (
-            <div className="p-12 text-center text-sm text-neutral-500">Loading ledger entries...</div>
+          {(isLoading || !isInitialLoadDone) ? (
+            <div className="p-12 text-center text-sm text-neutral-500 space-y-3">
+              <div className="w-7 h-7 rounded-full border-2 border-emerald-500 border-t-transparent animate-spin mx-auto" />
+              <p className="text-xs text-neutral-400">Loading ledger entries...</p>
+            </div>
           ) : payments.length === 0 ? (
             <div className="p-12 text-center text-neutral-500 space-y-2">
               <svg className="w-10 h-10 mx-auto text-neutral-600 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">

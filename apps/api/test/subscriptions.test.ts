@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import type pg from 'pg';
-import { createPool } from '@gym/db';
+import { createPool, cleanupTenant } from '@gym/db';
 import { buildApp } from '../src/app.js';
 import { hashPassword } from '../src/auth/crypto.js';
 import { signAccessToken } from '../src/auth/jwt.js';
@@ -11,6 +11,8 @@ describe('Membership Plans & Subscriptions Suite', () => {
   let pool: pg.Pool;
 
   let ownerToken: string;
+  let managerToken: string;
+  let superAdminToken: string;
   let staffToken: string;
   let otherGymOwnerToken: string;
   let gymId: string;
@@ -25,20 +27,29 @@ describe('Membership Plans & Subscriptions Suite', () => {
 
     const passHash = await hashPassword('TestPass123!');
     const ownerPhone = `+9195000${Date.now().toString().slice(-5)}`;
+    const managerPhone = `+9195333${Date.now().toString().slice(-5)}`;
     const staffPhone = `+9195111${Date.now().toString().slice(-5)}`;
     const otherOwnerPhone = `+9195222${Date.now().toString().slice(-5)}`;
 
     const ownerRes = await pool.query('SELECT auth_register_user($1, $2, $3);', [ownerPhone, passHash, 'Gym Owner']);
+    const managerRes = await pool.query('SELECT auth_register_user($1, $2, $3);', [managerPhone, passHash, 'Gym Manager']);
     const staffRes = await pool.query('SELECT auth_register_user($1, $2, $3);', [staffPhone, passHash, 'Gym Staff']);
     const otherOwnerRes = await pool.query('SELECT auth_register_user($1, $2, $3);', [otherOwnerPhone, passHash, 'Other Owner']);
 
     const ownerId = ownerRes.rows[0].auth_register_user;
+    const managerId = managerRes.rows[0].auth_register_user;
     const staffId = staffRes.rows[0].auth_register_user;
     const otherOwnerId = otherOwnerRes.rows[0].auth_register_user;
 
     ownerToken = signAccessToken({ userId: ownerId, fullName: 'Gym Owner' });
+    managerToken = signAccessToken({ userId: managerId, fullName: 'Gym Manager' });
     staffToken = signAccessToken({ userId: staffId, fullName: 'Gym Staff' });
     otherGymOwnerToken = signAccessToken({ userId: otherOwnerId, fullName: 'Other Owner' });
+    superAdminToken = signAccessToken({
+      userId: '2e2b3332-8976-4a88-8248-384adc94a022',
+      fullName: 'Super Admin',
+      isPlatformAdmin: true
+    });
 
     // Provision Gym 1
     const gymRes = await app.inject({
@@ -58,11 +69,15 @@ describe('Membership Plans & Subscriptions Suite', () => {
     });
     otherGymId = otherGymRes.json().gymId;
 
-    // Link staff to Gym 1
+    // Link manager and staff to Gym 1
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
       await client.query("SELECT set_config('app.gym_id', $1, true);", [gymId]);
+      await client.query(
+        "INSERT INTO user_gym_memberships (gym_id, user_id, role, is_active) VALUES ($1, $2, 'manager', true);",
+        [gymId, managerId]
+      );
       await client.query(
         "INSERT INTO user_gym_memberships (gym_id, user_id, role, is_active) VALUES ($1, $2, 'staff', true);",
         [gymId, staffId]
@@ -92,6 +107,8 @@ describe('Membership Plans & Subscriptions Suite', () => {
   });
 
   afterAll(async () => {
+    if (gymId) await cleanupTenant(pool, gymId);
+    if (otherGymId) await cleanupTenant(pool, otherGymId);
     await app.close();
   });
 
@@ -310,5 +327,89 @@ describe('Membership Plans & Subscriptions Suite', () => {
     });
     expect(attack3.statusCode).toBe(404);
     expect(attack3.json().error).toMatch(/plan not found in this gym/i);
+  });
+
+  it('12. plan deletion and update permission enforcement for owner, manager, and superadmin', async () => {
+    // A. Manager creates a new test plan
+    const createRes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymId}/plans`,
+      headers: { authorization: `Bearer ${managerToken}` },
+      payload: { name: 'Manager Promo Plan', durationDays: 45, priceCents: 450000 }
+    });
+    expect(createRes.statusCode).toBe(201);
+    const promoPlanId = createRes.json().plan.id;
+
+    // B. Non-manager staff attempts to update promo plan -> 403 Forbidden
+    const staffUpdate = await app.inject({
+      method: 'PATCH',
+      url: `/api/gyms/${gymId}/plans/${promoPlanId}`,
+      headers: { authorization: `Bearer ${staffToken}` },
+      payload: { name: 'Staff Tampered Name' }
+    });
+    expect(staffUpdate.statusCode).toBe(403);
+
+    // C. Non-manager staff attempts to delete promo plan -> 403 Forbidden
+    const staffDelete = await app.inject({
+      method: 'DELETE',
+      url: `/api/gyms/${gymId}/plans/${promoPlanId}`,
+      headers: { authorization: `Bearer ${staffToken}` }
+    });
+    expect(staffDelete.statusCode).toBe(403);
+
+    // D. Super Admin can update the plan
+    const superAdminUpdate = await app.inject({
+      method: 'PATCH',
+      url: `/api/gyms/${gymId}/plans/${promoPlanId}`,
+      headers: { authorization: `Bearer ${superAdminToken}` },
+      payload: { name: 'Super Admin Edited Plan', priceCents: 490000 }
+    });
+    expect(superAdminUpdate.statusCode).toBe(200);
+    expect(superAdminUpdate.json().plan.name).toBe('Super Admin Edited Plan');
+
+    // E. Manager deletes unreferenced promo plan -> 200, deleted: true
+    const managerDelete = await app.inject({
+      method: 'DELETE',
+      url: `/api/gyms/${gymId}/plans/${promoPlanId}`,
+      headers: { authorization: `Bearer ${managerToken}` }
+    });
+    expect(managerDelete.statusCode).toBe(200);
+    expect(managerDelete.json().success).toBe(true);
+    expect(managerDelete.json().archived).toBe(false);
+
+    // Verify it is gone from active plans list
+    const listRes = await app.inject({
+      method: 'GET',
+      url: `/api/gyms/${gymId}/plans`,
+      headers: { authorization: `Bearer ${ownerToken}` }
+    });
+    expect(listRes.json().plans.some((p: { id: string }) => p.id === promoPlanId)).toBe(false);
+
+    // F. Owner deletes plan that is referenced by activeSubId -> 200, archived: true (soft delete)
+    const ownerDeleteReferenced = await app.inject({
+      method: 'DELETE',
+      url: `/api/gyms/${gymId}/plans/${planId}`,
+      headers: { authorization: `Bearer ${ownerToken}` }
+    });
+    expect(ownerDeleteReferenced.statusCode).toBe(200);
+    expect(ownerDeleteReferenced.json().success).toBe(true);
+    expect(ownerDeleteReferenced.json().archived).toBe(true);
+
+    // Verify plan is excluded from plan listing
+    const listAfterDelete = await app.inject({
+      method: 'GET',
+      url: `/api/gyms/${gymId}/plans`,
+      headers: { authorization: `Bearer ${ownerToken}` }
+    });
+    expect(listAfterDelete.json().plans.some((p: { id: string }) => p.id === planId)).toBe(false);
+
+    // Verify historical subscription still retains its plan reference and name
+    const subHistoryRes = await app.inject({
+      method: 'GET',
+      url: `/api/gyms/${gymId}/subscriptions/${activeSubId}`,
+      headers: { authorization: `Bearer ${ownerToken}` }
+    });
+    expect(subHistoryRes.statusCode).toBe(200);
+    expect(subHistoryRes.json().subscription.planName).toBe('Quarterly Platinum');
   });
 });

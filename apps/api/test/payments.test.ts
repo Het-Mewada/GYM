@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { buildApp } from '../src/app.js';
 import type { FastifyInstance } from 'fastify';
-import { createPool } from '@gym/db';
+import { createPool, cleanupTenant } from '@gym/db';
 import { hashPassword } from '../src/auth/crypto.js';
 import crypto from 'node:crypto';
 import type pg from 'pg';
@@ -154,6 +154,8 @@ describe('Payments & Invoicing API: Append-Only Ledger, Receipts & Financials', 
   });
 
   afterAll(async () => {
+    if (gym1Id) await cleanupTenant(pool, gym1Id);
+    if (gym2Id) await cleanupTenant(pool, gym2Id);
     await app.close();
   });
 

@@ -7,6 +7,7 @@ import type pg from 'pg';
 import { assertDatabaseRole, createPool } from '@gym/db';
 import { authRoutes } from './auth/routes.js';
 import { gymRoutes } from './routes/gyms.js';
+import { publicRoutes } from './routes/public.js';
 
 // Polyfill BigInt.prototype.toJSON for clean JSON serialization of database monetary cents & counters
 if (typeof BigInt !== 'undefined' && !('toJSON' in BigInt.prototype)) {
@@ -103,6 +104,7 @@ export function buildApp(customPoolOrOptions?: pg.Pool | BuildAppOptions) {
   // Register routes
   app.register(authRoutes, { prefix: '/api/auth', pool });
   app.register(gymRoutes, { prefix: '/api/gyms', pool });
+  app.register(publicRoutes, { prefix: '/api/public/gyms', pool });
 
   app.addHook('onClose', async () => {
     await pool.end();

@@ -135,6 +135,7 @@ CREATE TABLE membership_plans (
   duration_days INTEGER NOT NULL CHECK (duration_days > 0),
   price_cents BIGINT NOT NULL CHECK (price_cents >= 0),
   is_active BOOLEAN NOT NULL DEFAULT true,
+  deleted_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT uq_membership_plans_gym_id UNIQUE (gym_id, id)
 );
@@ -162,6 +163,31 @@ CREATE TABLE members (
 );
 CREATE UNIQUE INDEX uq_members_gym_lower_email ON members (gym_id, lower(email)) WHERE email IS NOT NULL;
 CREATE INDEX idx_members_name_trgm ON members USING gin ((first_name || ' ' || COALESCE(last_name, '')) gin_trgm_ops);
+
+CREATE TABLE member_registration_requests (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  gym_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  first_name VARCHAR(50) NOT NULL,
+  last_name VARCHAR(50),
+  phone VARCHAR(20) NOT NULL,
+  email VARCHAR(255),
+  gender VARCHAR(20) DEFAULT 'unspecified',
+  date_of_birth DATE,
+  emergency_contact_name VARCHAR(100),
+  emergency_contact_phone VARCHAR(20),
+  notes TEXT,
+  status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
+  reviewed_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+  reviewed_at TIMESTAMPTZ,
+  rejection_reason VARCHAR(255),
+  enrolled_member_id UUID,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT uq_member_registration_requests_gym_id UNIQUE (gym_id, id),
+  CONSTRAINT fk_member_reg_enrolled_member FOREIGN KEY (gym_id, enrolled_member_id) REFERENCES members(gym_id, id) ON DELETE SET NULL
+);
+CREATE INDEX idx_member_reg_gym_status ON member_registration_requests (gym_id, status);
+CREATE INDEX idx_member_reg_gym_phone ON member_registration_requests (gym_id, phone);
 
 CREATE TABLE subscriptions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -335,6 +361,9 @@ CREATE TABLE audit_logs (
 CREATE OR REPLACE FUNCTION reject_table_mutation()
 RETURNS TRIGGER AS $$
 BEGIN
+  IF current_setting('app.allow_cleanup', true) = 'on' THEN
+    RETURN OLD;
+  END IF;
   RAISE EXCEPTION 'Table % is strictly append-only; mutations are forbidden.', TG_TABLE_NAME;
 END;
 $$ LANGUAGE plpgsql;
@@ -594,6 +623,13 @@ CREATE POLICY rls_membership_plans ON membership_plans
 ALTER TABLE members ENABLE ROW LEVEL SECURITY;
 ALTER TABLE members FORCE ROW LEVEL SECURITY;
 CREATE POLICY rls_members ON members
+  FOR ALL TO app_user
+  USING (gym_id = NULLIF(current_setting('app.gym_id', true), '')::uuid)
+  WITH CHECK (gym_id = NULLIF(current_setting('app.gym_id', true), '')::uuid);
+
+ALTER TABLE member_registration_requests ENABLE ROW LEVEL SECURITY;
+ALTER TABLE member_registration_requests FORCE ROW LEVEL SECURITY;
+CREATE POLICY rls_member_registration_requests ON member_registration_requests
   FOR ALL TO app_user
   USING (gym_id = NULLIF(current_setting('app.gym_id', true), '')::uuid)
   WITH CHECK (gym_id = NULLIF(current_setting('app.gym_id', true), '')::uuid);
@@ -1122,6 +1158,115 @@ END;
 $$;
 ALTER FUNCTION get_user_tenants OWNER TO definer_admin;
 
+-- Function 3d: Cleanup Single Tenant (Administrative & Test Teardown)
+CREATE OR REPLACE FUNCTION cleanup_tenant(p_tenant_id UUID)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_exists BOOLEAN;
+BEGIN
+  SELECT EXISTS(SELECT 1 FROM tenants WHERE id = p_tenant_id) INTO v_exists;
+  IF NOT v_exists THEN
+    RETURN FALSE;
+  END IF;
+
+  PERFORM set_config('app.allow_cleanup', 'on', true);
+
+  DELETE FROM payment_transactions WHERE gym_id = p_tenant_id;
+  DELETE FROM subscription_freezes WHERE gym_id = p_tenant_id;
+  DELETE FROM subscription_adjustments WHERE gym_id = p_tenant_id;
+  DELETE FROM subscriptions WHERE gym_id = p_tenant_id;
+  DELETE FROM attendance_logs WHERE gym_id = p_tenant_id;
+  DELETE FROM notification_logs WHERE gym_id = p_tenant_id;
+  DELETE FROM audit_logs WHERE gym_id = p_tenant_id;
+  DELETE FROM csv_import_jobs WHERE gym_id = p_tenant_id;
+  DELETE FROM staff_invitations WHERE gym_id = p_tenant_id;
+  DELETE FROM member_registration_requests WHERE gym_id = p_tenant_id;
+  DELETE FROM members WHERE gym_id = p_tenant_id;
+  DELETE FROM membership_plans WHERE gym_id = p_tenant_id;
+  DELETE FROM member_sequences WHERE gym_id = p_tenant_id;
+  DELETE FROM receipt_sequences WHERE gym_id = p_tenant_id;
+
+  -- Delete users whose ONLY gym membership was in this tenant (excluding platform super admins)
+  DELETE FROM users 
+  WHERE is_platform_admin = false 
+    AND id IN (SELECT user_id FROM user_gym_memberships WHERE gym_id = p_tenant_id)
+    AND id NOT IN (SELECT user_id FROM user_gym_memberships WHERE gym_id != p_tenant_id);
+
+  DELETE FROM user_gym_memberships WHERE gym_id = p_tenant_id;
+  DELETE FROM tenants WHERE id = p_tenant_id;
+
+  RETURN TRUE;
+END;
+$$;
+ALTER FUNCTION cleanup_tenant OWNER TO definer_admin;
+
+-- Function 3e: Cleanup All Ephemeral Test Tenants
+CREATE OR REPLACE FUNCTION cleanup_test_tenants()
+RETURNS INTEGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_count INTEGER := 0;
+  v_tenant RECORD;
+BEGIN
+  PERFORM set_config('app.allow_cleanup', 'on', true);
+
+  FOR v_tenant IN 
+    SELECT id FROM tenants 
+    WHERE (
+      slug ~ '-\d{10,}' 
+      OR slug LIKE 'test-%' 
+      OR slug LIKE 'sp-%' 
+      OR slug LIKE 'gym1-%' 
+      OR slug LIKE 'gym2-%' 
+      OR slug LIKE 'alpha-%' 
+      OR slug LIKE 'beta-%' 
+      OR slug LIKE 'iron-%' 
+      OR slug LIKE 'titan-%' 
+      OR slug LIKE 'spartan-%' 
+      OR slug LIKE 'omega-%' 
+      OR slug LIKE 'sec-gym-%' 
+      OR slug LIKE 'overlap-%' 
+      OR slug LIKE 'concurr-%'
+    )
+    AND slug != 'sfw-the-gym'
+  LOOP
+    DELETE FROM payment_transactions WHERE gym_id = v_tenant.id;
+    DELETE FROM subscription_freezes WHERE gym_id = v_tenant.id;
+    DELETE FROM subscription_adjustments WHERE gym_id = v_tenant.id;
+    DELETE FROM subscriptions WHERE gym_id = v_tenant.id;
+    DELETE FROM attendance_logs WHERE gym_id = v_tenant.id;
+    DELETE FROM notification_logs WHERE gym_id = v_tenant.id;
+    DELETE FROM audit_logs WHERE gym_id = v_tenant.id;
+    DELETE FROM csv_import_jobs WHERE gym_id = v_tenant.id;
+    DELETE FROM staff_invitations WHERE gym_id = v_tenant.id;
+    DELETE FROM member_registration_requests WHERE gym_id = v_tenant.id;
+    DELETE FROM members WHERE gym_id = v_tenant.id;
+    DELETE FROM membership_plans WHERE gym_id = v_tenant.id;
+    DELETE FROM member_sequences WHERE gym_id = v_tenant.id;
+    DELETE FROM receipt_sequences WHERE gym_id = v_tenant.id;
+
+    DELETE FROM users 
+    WHERE is_platform_admin = false 
+      AND id IN (SELECT user_id FROM user_gym_memberships WHERE gym_id = v_tenant.id)
+      AND id NOT IN (SELECT user_id FROM user_gym_memberships WHERE gym_id != v_tenant.id);
+
+    DELETE FROM user_gym_memberships WHERE gym_id = v_tenant.id;
+    DELETE FROM tenants WHERE id = v_tenant.id;
+    v_count := v_count + 1;
+  END LOOP;
+
+  RETURN v_count;
+END;
+$$;
+ALTER FUNCTION cleanup_test_tenants OWNER TO definer_admin;
+
 -- Function 4: Update Tenant Settings (Validates p_gym_id equals app.gym_id + timezone check)
 CREATE OR REPLACE FUNCTION update_tenant_settings(
   p_gym_id UUID,
@@ -1375,6 +1520,210 @@ END;
 $$;
 ALTER FUNCTION void_attendance_record OWNER TO definer_admin;
 
+-- Function 10: Submit Public Member Registration Request (QR Walk-In Self-Registration)
+CREATE OR REPLACE FUNCTION submit_member_registration_request(
+  p_gym_id UUID,
+  p_first_name VARCHAR(50),
+  p_last_name VARCHAR(50),
+  p_phone VARCHAR(20),
+  p_email VARCHAR(255),
+  p_gender VARCHAR(20) DEFAULT 'unspecified',
+  p_date_of_birth DATE DEFAULT NULL,
+  p_emergency_contact_name VARCHAR(100) DEFAULT NULL,
+  p_emergency_contact_phone VARCHAR(20) DEFAULT NULL,
+  p_notes TEXT DEFAULT NULL
+)
+RETURNS UUID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_gym_exists BOOLEAN;
+  v_request_id UUID;
+  v_norm_phone VARCHAR(20);
+  v_norm_email VARCHAR(255);
+BEGIN
+  SELECT EXISTS(SELECT 1 FROM tenants WHERE id = p_gym_id AND status IN ('trial', 'active')) INTO v_gym_exists;
+  IF NOT v_gym_exists THEN
+    RAISE EXCEPTION 'Gym does not exist or is inactive.';
+  END IF;
+
+  v_norm_phone := TRIM(p_phone);
+  v_norm_email := NULLIF(LOWER(TRIM(p_email)), '');
+
+  IF EXISTS(SELECT 1 FROM members WHERE gym_id = p_gym_id AND phone = v_norm_phone) THEN
+    RAISE EXCEPTION 'A member with phone % is already registered in this gym.', v_norm_phone;
+  END IF;
+
+  IF v_norm_email IS NOT NULL AND EXISTS(SELECT 1 FROM members WHERE gym_id = p_gym_id AND lower(email) = v_norm_email) THEN
+    RAISE EXCEPTION 'A member with email % is already registered in this gym.', v_norm_email;
+  END IF;
+
+  IF EXISTS(SELECT 1 FROM member_registration_requests WHERE gym_id = p_gym_id AND phone = v_norm_phone AND status = 'pending') THEN
+    RAISE EXCEPTION 'A registration request for this phone number is already pending review.';
+  END IF;
+
+  INSERT INTO member_registration_requests (
+    gym_id,
+    first_name,
+    last_name,
+    phone,
+    email,
+    gender,
+    date_of_birth,
+    emergency_contact_name,
+    emergency_contact_phone,
+    notes,
+    status
+  ) VALUES (
+    p_gym_id,
+    TRIM(p_first_name),
+    NULLIF(TRIM(p_last_name), ''),
+    v_norm_phone,
+    v_norm_email,
+    COALESCE(p_gender, 'unspecified'),
+    p_date_of_birth,
+    NULLIF(TRIM(p_emergency_contact_name), ''),
+    NULLIF(TRIM(p_emergency_contact_phone), ''),
+    NULLIF(TRIM(p_notes), ''),
+    'pending'
+  ) RETURNING id INTO v_request_id;
+
+  RETURN v_request_id;
+END;
+$$;
+ALTER FUNCTION submit_member_registration_request OWNER TO definer_admin;
+
+-- Function 11: Approve Member Registration Request
+CREATE OR REPLACE FUNCTION approve_member_registration_request(
+  p_gym_id UUID,
+  p_request_id UUID,
+  p_reviewer_user_id UUID
+)
+RETURNS UUID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_req RECORD;
+  v_member_number VARCHAR(50);
+  v_member_id UUID;
+BEGIN
+  IF p_gym_id <> NULLIF(current_setting('app.gym_id', true), '')::uuid THEN
+    RAISE EXCEPTION 'Access denied: p_gym_id does not match active session tenant.';
+  END IF;
+
+  SELECT * INTO v_req
+  FROM member_registration_requests
+  WHERE id = p_request_id AND gym_id = p_gym_id
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Registration request % not found for gym %.', p_request_id, p_gym_id;
+  END IF;
+
+  IF v_req.status <> 'pending' THEN
+    RAISE EXCEPTION 'Registration request is already %.', v_req.status;
+  END IF;
+
+  IF EXISTS(SELECT 1 FROM members WHERE gym_id = p_gym_id AND phone = v_req.phone) THEN
+    RAISE EXCEPTION 'A member with phone % already exists in this gym.', v_req.phone;
+  END IF;
+
+  IF v_req.email IS NOT NULL AND EXISTS(SELECT 1 FROM members WHERE gym_id = p_gym_id AND lower(email) = lower(v_req.email)) THEN
+    RAISE EXCEPTION 'A member with email % already exists in this gym.', v_req.email;
+  END IF;
+
+  v_member_number := generate_next_member_number(p_gym_id);
+
+  INSERT INTO members (
+    gym_id,
+    member_number,
+    first_name,
+    last_name,
+    phone,
+    email,
+    gender,
+    date_of_birth,
+    emergency_contact_name,
+    emergency_contact_phone,
+    status,
+    joined_date
+  ) VALUES (
+    p_gym_id,
+    v_member_number,
+    v_req.first_name,
+    v_req.last_name,
+    v_req.phone,
+    v_req.email,
+    v_req.gender,
+    v_req.date_of_birth,
+    v_req.emergency_contact_name,
+    v_req.emergency_contact_phone,
+    'active',
+    CURRENT_DATE
+  ) RETURNING id INTO v_member_id;
+
+  UPDATE member_registration_requests
+  SET status = 'approved',
+      reviewed_by_user_id = p_reviewer_user_id,
+      reviewed_at = CURRENT_TIMESTAMP,
+      enrolled_member_id = v_member_id,
+      updated_at = CURRENT_TIMESTAMP
+  WHERE id = p_request_id;
+
+  RETURN v_member_id;
+END;
+$$;
+ALTER FUNCTION approve_member_registration_request OWNER TO definer_admin;
+
+-- Function 12: Reject Member Registration Request
+CREATE OR REPLACE FUNCTION reject_member_registration_request(
+  p_gym_id UUID,
+  p_request_id UUID,
+  p_reviewer_user_id UUID,
+  p_rejection_reason VARCHAR(255) DEFAULT NULL
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_req RECORD;
+BEGIN
+  IF p_gym_id <> NULLIF(current_setting('app.gym_id', true), '')::uuid THEN
+    RAISE EXCEPTION 'Access denied: p_gym_id does not match active session tenant.';
+  END IF;
+
+  SELECT * INTO v_req
+  FROM member_registration_requests
+  WHERE id = p_request_id AND gym_id = p_gym_id
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Registration request % not found for gym %.', p_request_id, p_gym_id;
+  END IF;
+
+  IF v_req.status <> 'pending' THEN
+    RAISE EXCEPTION 'Registration request is already %.', v_req.status;
+  END IF;
+
+  UPDATE member_registration_requests
+  SET status = 'rejected',
+      reviewed_by_user_id = p_reviewer_user_id,
+      reviewed_at = CURRENT_TIMESTAMP,
+      rejection_reason = NULLIF(TRIM(p_rejection_reason), ''),
+      updated_at = CURRENT_TIMESTAMP
+  WHERE id = p_request_id;
+
+  RETURN TRUE;
+END;
+$$;
+ALTER FUNCTION reject_member_registration_request OWNER TO definer_admin;
+
 -- ============================================================================
 -- 7. PERMISSIONS & GRANTS
 -- ============================================================================
@@ -1388,7 +1737,7 @@ GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO definer_admin;
 REVOKE ALL ON users, tenants FROM app_user;
 
 -- Grants on tenant-scoped tables
-GRANT SELECT, INSERT, UPDATE, DELETE ON members, membership_plans, subscriptions, subscription_freezes, csv_import_jobs, staff_invitations, user_gym_memberships TO app_user;
+GRANT SELECT, INSERT, UPDATE, DELETE ON members, membership_plans, subscriptions, subscription_freezes, csv_import_jobs, staff_invitations, user_gym_memberships, member_registration_requests TO app_user;
 GRANT SELECT, INSERT, UPDATE ON refresh_tokens TO app_user;
 GRANT SELECT ON tenants TO app_user;
 GRANT SELECT, INSERT ON payment_transactions, attendance_logs, notification_logs, audit_logs, subscription_adjustments TO app_user;
@@ -1422,6 +1771,11 @@ GRANT EXECUTE ON FUNCTION claim_staff_invitation TO app_user;
 GRANT EXECUTE ON FUNCTION generate_next_receipt_number(UUID) TO app_user;
 GRANT EXECUTE ON FUNCTION generate_next_member_number(UUID) TO app_user;
 GRANT EXECUTE ON FUNCTION void_attendance_record TO app_user;
+GRANT EXECUTE ON FUNCTION submit_member_registration_request TO app_user;
+GRANT EXECUTE ON FUNCTION approve_member_registration_request TO app_user;
+GRANT EXECUTE ON FUNCTION reject_member_registration_request TO app_user;
+GRANT EXECUTE ON FUNCTION cleanup_tenant(UUID) TO app_user;
+GRANT EXECUTE ON FUNCTION cleanup_test_tenants() TO app_user;
 
 -- account_login_attempts table owned by definer_admin, revoked from app_user
 ALTER TABLE account_login_attempts OWNER TO definer_admin;

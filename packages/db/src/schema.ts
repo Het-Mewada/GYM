@@ -94,6 +94,7 @@ export const membershipPlans = pgTable('membership_plans', {
   durationDays: integer('duration_days').notNull(),
   priceCents: bigint('price_cents', { mode: 'bigint' }).notNull(),
   isActive: boolean('is_active').notNull().default(true),
+  deletedAt: timestamp('deleted_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
 }, (table) => [
   uniqueIndex('uq_membership_plans_gym_id').on(table.gymId, table.id)
@@ -122,6 +123,35 @@ export const members = pgTable('members', {
   uniqueIndex('uq_members_gym_phone').on(table.gymId, table.phone),
   uniqueIndex('uq_members_gym_email').on(table.gymId, table.email),
   uniqueIndex('uq_members_gym_number').on(table.gymId, table.memberNumber)
+]);
+
+// 7b. member_registration_requests
+export const memberRegistrationRequests = pgTable('member_registration_requests', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  gymId: uuid('gym_id').notNull().references(() => tenants.id, { onDelete: 'cascade' }),
+  firstName: varchar('first_name', { length: 50 }).notNull(),
+  lastName: varchar('last_name', { length: 50 }),
+  phone: varchar('phone', { length: 20 }).notNull(),
+  email: varchar('email', { length: 255 }),
+  gender: varchar('gender', { length: 20 }).default('unspecified'),
+  dateOfBirth: date('date_of_birth'),
+  emergencyContactName: varchar('emergency_contact_name', { length: 100 }),
+  emergencyContactPhone: varchar('emergency_contact_phone', { length: 20 }),
+  notes: text('notes'),
+  status: varchar('status', { length: 20 }).notNull().default('pending'),
+  reviewedByUserId: uuid('reviewed_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+  reviewedAt: timestamp('reviewed_at', { withTimezone: true }),
+  rejectionReason: varchar('rejection_reason', { length: 255 }),
+  enrolledMemberId: uuid('enrolled_member_id'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
+}, (table) => [
+  uniqueIndex('uq_member_registration_requests_gym_id').on(table.gymId, table.id),
+  foreignKey({
+    columns: [table.gymId, table.enrolledMemberId],
+    foreignColumns: [members.gymId, members.id],
+    name: 'fk_member_reg_enrolled_member'
+  }).onDelete('set null')
 ]);
 
 // 8. member_sequences

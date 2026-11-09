@@ -12,14 +12,20 @@ import {
   fetchMembers,
   createMember,
   updateMember,
+  fetchPlatformTenants,
   fetchMembershipPlans,
   fetchMemberSubscriptions,
   createSubscription,
-  cancelSubscription
+  cancelSubscription,
+  type MemberRegistrationRequest,
+  fetchRegistrationRequests,
+  approveRegistrationRequest,
+  rejectRegistrationRequest
 } from '../lib/api';
 import { useToast } from '../components/Toast';
 import { Navbar } from '../components/Navbar';
 import { PhoneInput, parsePhone } from '../components/PhoneInput';
+import { TenantQrModal } from '../components/TenantQrModal';
 
 export default function MembersPage() {
   const router = useRouter();
@@ -27,6 +33,7 @@ export default function MembersPage() {
   const [isCheckingAuth, setIsCheckingAuth] = useState<boolean>(true);
   const [gymId, setGymId] = useState<string>('');
   const [gymName, setGymName] = useState<string | null>(null);
+  const [gymSlug, setGymSlug] = useState<string>('');
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [members, setMembers] = useState<Member[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
@@ -35,6 +42,16 @@ export default function MembersPage() {
   const [isInitialLoadDone, setIsInitialLoadDone] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+
+  // Tab & Registration Requests State
+  const [activeTab, setActiveTab] = useState<'directory' | 'requests'>('directory');
+  const [isQrModalOpen, setIsQrModalOpen] = useState(false);
+  const [pendingRequests, setPendingRequests] = useState<MemberRegistrationRequest[]>([]);
+  const [isLoadingRequests, setIsLoadingRequests] = useState(false);
+  const [approvingId, setApprovingId] = useState<string | null>(null);
+  const [rejectingId, setRejectingId] = useState<string | null>(null);
+  const [rejectModalReq, setRejectModalReq] = useState<MemberRegistrationRequest | null>(null);
+  const [rejectReason, setRejectReason] = useState('');
 
   // Add Member Modal State
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -90,15 +107,18 @@ export default function MembersPage() {
         setIsCheckingAuth(false);
         setIsLoading(false);
         setIsInitialLoadDone(true);
+        router.replace('/');
         return;
       }
 
       const storedGymId = localStorage.getItem('gym_id');
       const storedGymName = localStorage.getItem('gym_name');
+      const storedGymSlug = localStorage.getItem('gym_slug');
 
       setIsAuthenticated(true);
       if (storedGymId) setGymId(storedGymId);
       if (storedGymName) setGymName(storedGymName);
+      if (storedGymSlug) setGymSlug(storedGymSlug);
       setIsCheckingAuth(false);
 
       if (storedGymId) {
@@ -116,12 +136,101 @@ export default function MembersPage() {
             setIsLoading(false);
             setIsInitialLoadDone(true);
           });
+
+        fetchRegistrationRequests(storedGymId, 'pending', token)
+          .then((res) => {
+            if (res && Array.isArray(res.requests)) {
+              setPendingRequests(res.requests);
+            }
+          })
+          .catch(() => {});
       } else {
-        setIsLoading(false);
-        setIsInitialLoadDone(true);
+        setIsLoading(true);
+        fetchPlatformTenants(token)
+          .then((res) => {
+            if (res && Array.isArray(res.tenants) && res.tenants.length > 0) {
+              const defaultTenant = res.tenants[0];
+              localStorage.setItem('gym_id', defaultTenant.id);
+              localStorage.setItem('gym_name', defaultTenant.name);
+              setGymId(defaultTenant.id);
+              setGymName(defaultTenant.name);
+              fetchMembers(defaultTenant.id, {}, token)
+                .then((mRes) => {
+                  if (mRes && Array.isArray(mRes.members)) {
+                    setMembers(mRes.members);
+                  }
+                })
+                .catch((err: unknown) => {
+                  setError(err instanceof Error ? err.message : 'Failed to fetch members from server');
+                })
+                .finally(() => {
+                  setIsLoading(false);
+                  setIsInitialLoadDone(true);
+                });
+            } else {
+              setIsLoading(false);
+              setIsInitialLoadDone(true);
+            }
+          })
+          .catch(() => {
+            setIsLoading(false);
+            setIsInitialLoadDone(true);
+          });
       }
+
+      const handleGymChangeEvent = (e: Event) => {
+        const customEvent = e as CustomEvent<{ gymId: string; gymName: string; gymSlug?: string }>;
+        if (customEvent.detail?.gymId) {
+          setGymId(customEvent.detail.gymId);
+          setGymName(customEvent.detail.gymName);
+          if (customEvent.detail.gymSlug) setGymSlug(customEvent.detail.gymSlug);
+          setIsLoading(true);
+          fetchMembers(customEvent.detail.gymId, {}, token)
+            .then((res) => {
+              if (res && Array.isArray(res.members)) {
+                setMembers(res.members);
+              }
+            })
+            .catch((err: unknown) => {
+              setError(err instanceof Error ? err.message : 'Failed to fetch members from server');
+            })
+            .finally(() => {
+              setIsLoading(false);
+            });
+
+          fetchRegistrationRequests(customEvent.detail.gymId, 'pending', token)
+            .then((res) => {
+              if (res && Array.isArray(res.requests)) {
+                setPendingRequests(res.requests);
+              }
+            })
+            .catch(() => {});
+        }
+      };
+
+      window.addEventListener('gym-changed', handleGymChangeEvent);
+      return () => window.removeEventListener('gym-changed', handleGymChangeEvent);
     }
   }, [router]);
+
+  // Fetch pending registration requests for this gym
+  const loadPendingRequests = useCallback(async () => {
+    if (typeof window === 'undefined') return;
+    const token = localStorage.getItem('access_token');
+    if (!token || !gymId) return;
+
+    setIsLoadingRequests(true);
+    try {
+      const res = await fetchRegistrationRequests(gymId, 'pending', token);
+      if (res && Array.isArray(res.requests)) {
+        setPendingRequests(res.requests);
+      }
+    } catch (err: unknown) {
+      console.warn('Failed to load registration requests:', err);
+    } finally {
+      setIsLoadingRequests(false);
+    }
+  }, [gymId]);
 
   // Fetch members from live backend only when authenticated
   const loadMembers = useCallback(async () => {
@@ -151,6 +260,8 @@ export default function MembersPage() {
     if (typeof window !== 'undefined') {
       localStorage.setItem('gym_id', newGymId);
       localStorage.setItem('gym_name', newGymName);
+      const storedSlug = localStorage.getItem('gym_slug') || '';
+      setGymSlug(storedSlug);
     }
     setGymId(newGymId);
     setGymName(newGymName);
@@ -168,6 +279,41 @@ export default function MembersPage() {
       .finally(() => {
         setIsLoading(false);
       });
+
+    loadPendingRequests();
+  };
+
+  const handleApproveRequest = async (request: MemberRegistrationRequest) => {
+    setApprovingId(request.id);
+    try {
+      const res = await approveRegistrationRequest(gymId, request.id);
+      toast.success(
+        `✓ ${request.firstName} approved! Enrolled with Member ID ${res.member?.memberNumber || res.memberId}`
+      );
+      setPendingRequests((prev) => prev.filter((r) => r.id !== request.id));
+      loadMembers();
+    } catch (err: unknown) {
+      toast.error((err as Error).message || 'Failed to approve registration request');
+    } finally {
+      setApprovingId(null);
+    }
+  };
+
+  const handleConfirmReject = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!rejectModalReq) return;
+    setRejectingId(rejectModalReq.id);
+    try {
+      await rejectRegistrationRequest(gymId, rejectModalReq.id, rejectReason.trim() || undefined);
+      toast.info(`Registration request for ${rejectModalReq.firstName} was rejected.`);
+      setPendingRequests((prev) => prev.filter((r) => r.id !== rejectModalReq.id));
+      setRejectModalReq(null);
+      setRejectReason('');
+    } catch (err: unknown) {
+      toast.error((err as Error).message || 'Failed to reject registration request');
+    } finally {
+      setRejectingId(null);
+    }
   };
 
   // Handle debounced search/filter changes after initial load is done
@@ -595,11 +741,11 @@ export default function MembersPage() {
     return members.filter((m) => m.status === 'active').length;
   }, [members]);
 
-  if (isCheckingAuth) {
+  if (isCheckingAuth || !isAuthenticated) {
     return (
       <div className="min-h-screen bg-neutral-950 flex flex-col items-center justify-center space-y-4">
         <div className="w-8 h-8 rounded-full border-2 border-emerald-500 border-t-transparent animate-spin" />
-        <p className="text-xs text-neutral-400 font-medium">Loading members directory...</p>
+        <p className="text-xs text-neutral-400 font-medium">Checking authentication...</p>
       </div>
     );
   }
@@ -615,23 +761,6 @@ export default function MembersPage() {
 
       {/* Main Content Area */}
       <main className="w-full px-6 py-8 flex-1 space-y-6">
-        {/* Preview Mode Notice Banner */}
-        {!isAuthenticated && (
-          <div data-testid="preview-mode-banner" className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 rounded-xl border border-emerald-900/60 bg-emerald-950/20 text-emerald-200 text-xs">
-            <div className="flex items-center gap-2.5">
-              <span className="flex h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-              <span>
-                <strong>Preview Mode:</strong> No authenticated gym session active. Sign in to sync member directory with cloud PostgreSQL database.
-              </span>
-            </div>
-            <Link
-              href="/login"
-              className="inline-flex items-center justify-center px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-black font-semibold text-xs transition whitespace-nowrap"
-            >
-              Sign In to GymOS
-            </Link>
-          </div>
-        )}
 
         {/* Header Title & Actions */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -657,6 +786,19 @@ export default function MembersPage() {
           <div className="flex items-center gap-3">
             <button
               type="button"
+              data-testid="qr-code-button"
+              onClick={() => setIsQrModalOpen(true)}
+              className="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-neutral-900 hover:bg-neutral-800 text-neutral-200 border border-neutral-700 font-semibold text-sm transition shadow-sm cursor-pointer"
+            >
+              <svg className="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 4.875c0-.621.504-1.125 1.125-1.125h4.5c.621 0 1.125.504 1.125 1.125v4.5c0 .621-.504 1.125-1.125 1.125h-4.5A1.125 1.125 0 013.75 9.375v-4.5zM3.75 14.625c0-.621.504-1.125 1.125-1.125h4.5c.621 0 1.125.504 1.125 1.125v4.5c0 .621-.504 1.125-1.125 1.125h-4.5a1.125 1.125 0 01-1.125-1.125v-4.5zM13.5 4.875c0-.621.504-1.125 1.125-1.125h4.5c.621 0 1.125.504 1.125 1.125v4.5c0 .621-.504 1.125-1.125 1.125h-4.5A1.125 1.125 0 0113.5 9.375v-4.5z" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M6.75 6.75h.008v.008H6.75V6.75zM6.75 16.5h.008v.008H6.75V16.5zM16.5 6.75h.008v.008H16.5V6.75zM13.5 13.5h.008v.008H13.5V13.5zM13.5 19.5h.008v.008H13.5V19.5zM19.5 13.5h.008v.008H19.5V13.5zM16.5 16.5h.008v.008H16.5V16.5zM19.5 19.5h.008v.008H19.5V19.5z" />
+              </svg>
+              Registration QR
+            </button>
+
+            <button
+              type="button"
               data-testid="add-member-button"
               onClick={() => setIsModalOpen(true)}
               className="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-black font-semibold text-sm transition shadow-lg shadow-emerald-950/40 cursor-pointer"
@@ -669,7 +811,48 @@ export default function MembersPage() {
           </div>
         </div>
 
-        {/* Quick Stats Cards */}
+        {/* Navigation Tabs */}
+        <div className="flex items-center gap-2 border-b border-neutral-800 pb-2">
+          <button
+            type="button"
+            data-testid="tab-directory"
+            onClick={() => setActiveTab('directory')}
+            className={`px-4 py-2 rounded-lg text-sm font-semibold transition flex items-center gap-2 cursor-pointer ${
+              activeTab === 'directory'
+                ? 'bg-neutral-800 text-white border border-neutral-700 shadow-sm'
+                : 'text-neutral-400 hover:text-white hover:bg-neutral-900'
+            }`}
+          >
+            Directory ({members.length})
+          </button>
+          <button
+            type="button"
+            data-testid="tab-pending-requests"
+            onClick={() => {
+              setActiveTab('requests');
+              loadPendingRequests();
+            }}
+            className={`px-4 py-2 rounded-lg text-sm font-semibold transition flex items-center gap-2 cursor-pointer ${
+              activeTab === 'requests'
+                ? 'bg-neutral-800 text-white border border-neutral-700 shadow-sm'
+                : 'text-neutral-400 hover:text-white hover:bg-neutral-900'
+            }`}
+          >
+            Pending Requests
+            {pendingRequests.length > 0 && (
+              <span
+                data-testid="pending-requests-badge"
+                className="px-2 py-0.5 rounded-full text-xs font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30"
+              >
+                {pendingRequests.length}
+              </span>
+            )}
+          </button>
+        </div>
+
+        {activeTab === 'directory' && (
+          <>
+            {/* Quick Stats Cards */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div className="border border-neutral-800/80 bg-neutral-900/40 p-4 rounded-xl">
             <div className="text-xs font-medium text-neutral-400 uppercase tracking-wider">Total Members</div>
@@ -859,6 +1042,142 @@ export default function MembersPage() {
             </table>
           </div>
         </div>
+          </>
+        )}
+
+        {/* Pending Requests Tab */}
+        {activeTab === 'requests' && (
+          <div className="space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                  <span>Pending Self-Registration Requests</span>
+                  <span className="text-xs px-2.5 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20 font-medium">
+                    Owner / Manager Approval Required
+                  </span>
+                </h2>
+                <p className="text-xs text-neutral-400 mt-1">
+                  Walk-in visitors who scanned your gym&apos;s registration QR code appear here. Approve to issue official membership number and enroll them into your gym.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={loadPendingRequests}
+                disabled={isLoadingRequests}
+                className="self-start sm:self-auto px-3 py-1.5 rounded-lg bg-neutral-900 hover:bg-neutral-800 text-neutral-300 text-xs font-medium border border-neutral-800 transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+              >
+                <svg className={`w-3.5 h-3.5 ${isLoadingRequests ? 'animate-spin text-emerald-400' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+                {isLoadingRequests ? 'Refreshing...' : 'Refresh Requests'}
+              </button>
+            </div>
+
+            <div className="rounded-xl border border-neutral-800 bg-neutral-900/40 overflow-hidden shadow-xl">
+              <table className="w-full text-left text-sm text-neutral-300">
+                <thead className="bg-neutral-900/80 text-xs uppercase text-neutral-400 tracking-wider border-b border-neutral-800">
+                  <tr>
+                    <th className="px-6 py-3.5 font-medium">Applicant Name</th>
+                    <th className="px-6 py-3.5 font-medium">Phone Number</th>
+                    <th className="px-6 py-3.5 font-medium">Email</th>
+                    <th className="px-6 py-3.5 font-medium">Details</th>
+                    <th className="px-6 py-3.5 font-medium">Submitted</th>
+                    <th className="px-6 py-3.5 font-medium text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-neutral-800/60 font-normal">
+                  {isLoadingRequests ? (
+                    <tr>
+                      <td colSpan={6} className="px-6 py-16 text-center">
+                        <div className="flex flex-col items-center justify-center space-y-3">
+                          <div className="w-8 h-8 rounded-full border-2 border-emerald-500 border-t-transparent animate-spin" />
+                          <p className="text-xs font-medium text-neutral-400">Loading pending requests...</p>
+                        </div>
+                      </td>
+                    </tr>
+                  ) : pendingRequests.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="px-6 py-16 text-center" data-testid="empty-requests-state">
+                        <div className="flex flex-col items-center justify-center space-y-3">
+                          <div className="w-12 h-12 rounded-full bg-neutral-900 border border-neutral-800 flex items-center justify-center text-neutral-500">
+                            <svg className="w-6 h-6 text-neutral-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                            </svg>
+                          </div>
+                          <div className="text-base font-semibold text-neutral-300">
+                            No Pending Registration Requests
+                          </div>
+                          <p className="text-xs text-neutral-500 max-w-md">
+                            All registration requests have been processed. Click &quot;Registration QR&quot; above to display or print your gym&apos;s QR code for new walk-ins.
+                          </p>
+                        </div>
+                      </td>
+                    </tr>
+                  ) : (
+                    pendingRequests.map((req) => (
+                      <tr key={req.id} data-testid={`request-row-${req.id}`} className="hover:bg-neutral-900/50 transition">
+                        <td className="px-6 py-4">
+                          <div className="font-semibold text-white">{req.firstName} {req.lastName || ''}</div>
+                          {req.gender && req.gender !== 'unspecified' && (
+                            <span className="text-[11px] text-neutral-500 capitalize">{req.gender}</span>
+                          )}
+                        </td>
+                        <td className="px-6 py-4 font-mono text-xs text-neutral-200">
+                          {req.phone}
+                        </td>
+                        <td className="px-6 py-4 text-xs text-neutral-400">
+                          {req.email || '—'}
+                        </td>
+                        <td className="px-6 py-4 text-xs text-neutral-400 max-w-xs">
+                          {req.dateOfBirth && <div>DOB: {req.dateOfBirth}</div>}
+                          {req.notes && <div className="text-neutral-300 italic truncate">&quot;{req.notes}&quot;</div>}
+                          {req.emergencyContactName && (
+                            <div className="text-[11px] text-neutral-500">
+                              Emergency: {req.emergencyContactName} ({req.emergencyContactPhone || 'No phone'})
+                            </div>
+                          )}
+                          {!req.dateOfBirth && !req.notes && !req.emergencyContactName && '—'}
+                        </td>
+                        <td className="px-6 py-4 text-xs text-neutral-400 whitespace-nowrap">
+                          {new Date(req.createdAt).toLocaleDateString()} {new Date(req.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-right space-x-2">
+                          <button
+                            type="button"
+                            data-testid={`approve-request-${req.id}`}
+                            disabled={approvingId === req.id || rejectingId === req.id}
+                            onClick={() => handleApproveRequest(req)}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-500 hover:bg-emerald-400 text-black transition shadow-sm cursor-pointer disabled:opacity-50"
+                          >
+                            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+                            </svg>
+                            {approvingId === req.id ? 'Approving...' : 'Approve'}
+                          </button>
+                          <button
+                            type="button"
+                            data-testid={`reject-request-${req.id}`}
+                            disabled={approvingId === req.id || rejectingId === req.id}
+                            onClick={() => {
+                              setRejectModalReq(req);
+                              setRejectReason('');
+                            }}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 transition cursor-pointer disabled:opacity-50"
+                          >
+                            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                            </svg>
+                            Reject
+                          </button>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
       </main>
 
       {/* Add Member Modal */}
@@ -1471,6 +1790,57 @@ export default function MembersPage() {
           </div>
         </div>
       )}
+      {/* Reject Request Modal */}
+      {rejectModalReq && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm">
+          <div className="w-full max-w-md bg-neutral-900 border border-neutral-800 rounded-2xl p-6 shadow-2xl">
+            <h3 className="text-lg font-bold text-white mb-1">Reject Registration Request</h3>
+            <p className="text-xs text-neutral-400 mb-4">
+              Are you sure you want to reject the self-registration request for <strong className="text-white">{rejectModalReq.firstName} {rejectModalReq.lastName || ''}</strong> ({rejectModalReq.phone})?
+            </p>
+            <form onSubmit={handleConfirmReject} className="space-y-4">
+              <div>
+                <label className="block text-xs font-medium text-neutral-300 mb-1">
+                  Reason for rejection <span className="text-neutral-500">(Optional)</span>
+                </label>
+                <input
+                  type="text"
+                  maxLength={255}
+                  value={rejectReason}
+                  onChange={(e) => setRejectReason(e.target.value)}
+                  placeholder="e.g. Incomplete details, invalid contact, spam"
+                  className="w-full rounded-xl bg-neutral-950 border border-neutral-800 px-3 py-2 text-xs text-white placeholder-neutral-600 focus:border-rose-500 focus:outline-none focus:ring-1 focus:ring-rose-500"
+                />
+              </div>
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setRejectModalReq(null)}
+                  className="px-4 py-2 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-xs font-semibold transition cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={rejectingId === rejectModalReq.id}
+                  className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold transition disabled:opacity-50 cursor-pointer"
+                >
+                  {rejectingId === rejectModalReq.id ? 'Rejecting...' : 'Confirm Reject'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Tenant QR Code Modal */}
+      <TenantQrModal
+        isOpen={isQrModalOpen}
+        onClose={() => setIsQrModalOpen(false)}
+        gymId={gymId}
+        gymName={gymName || 'Gym'}
+        gymSlug={gymSlug}
+      />
     </div>
   );
 }

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { FastifyInstance, RouteOptions } from 'fastify';
 import type pg from 'pg';
-import { createPool } from '@gym/db';
+import { createPool, cleanupTenant } from '@gym/db';
 import { buildApp } from '../src/app.js';
 import { hashPassword, generateRandomToken, hashToken } from '../src/auth/crypto.js';
 import { signAccessToken } from '../src/auth/jwt.js';
@@ -32,6 +32,8 @@ const ROUTE_REGISTRY: RouteDeclaration[] = [
   { method: 'POST', url: '/api/auth/switch-gym', isTenantScoped: false, notes: 'Tenant session switch with credential re-verification' },
   { method: 'POST', url: '/api/gyms', isTenantScoped: false, notes: 'User-scoped gym provisioning' },
   { method: 'GET', url: '/api/gyms', isTenantScoped: false, notes: 'List gyms (platform admin gets all; users get memberships)' },
+  { method: 'GET', url: '/api/public/gyms/:gymSlugOrId/info', isTenantScoped: false, notes: 'Public gym details for QR landing' },
+  { method: 'POST', url: '/api/public/gyms/:gymSlugOrId/register', isTenantScoped: false, notes: 'Public member self-registration request' },
 
   // 2. Tenant-Scoped Resource Routes (Must have isolation tests)
   {
@@ -120,6 +122,15 @@ const ROUTE_REGISTRY: RouteDeclaration[] = [
     notes: 'Update membership plan'
   },
   {
+    method: 'DELETE',
+    url: '/api/gyms/:gymId/plans/:planId',
+    isTenantScoped: true,
+    hasPathIsolationTest: true,
+    hasBodyIsolationTest: false,
+    hasResourceIdIsolationTest: true,
+    notes: 'Delete membership plan'
+  },
+  {
     method: 'GET',
     url: '/api/gyms/:gymId/members/:memberId/subscriptions',
     isTenantScoped: true,
@@ -197,6 +208,69 @@ const ROUTE_REGISTRY: RouteDeclaration[] = [
     hasBodyIsolationTest: false,
     hasResourceIdIsolationTest: true,
     notes: 'Get member financial summary'
+  },
+  {
+    method: 'POST',
+    url: '/api/gyms/:gymId/attendance/check-in',
+    isTenantScoped: true,
+    hasPathIsolationTest: true,
+    hasBodyIsolationTest: true,
+    hasResourceIdIsolationTest: true,
+    notes: 'Member attendance check-in'
+  },
+  {
+    method: 'POST',
+    url: '/api/gyms/:gymId/attendance/:attendanceId/void',
+    isTenantScoped: true,
+    hasPathIsolationTest: true,
+    hasBodyIsolationTest: true,
+    hasResourceIdIsolationTest: true,
+    notes: 'Void attendance record'
+  },
+  {
+    method: 'GET',
+    url: '/api/gyms/:gymId/attendance',
+    isTenantScoped: true,
+    hasPathIsolationTest: true,
+    hasBodyIsolationTest: false,
+    hasResourceIdIsolationTest: false,
+    notes: 'List gym attendance logs'
+  },
+  {
+    method: 'GET',
+    url: '/api/gyms/:gymId/members/:memberId/attendance',
+    isTenantScoped: true,
+    hasPathIsolationTest: true,
+    hasBodyIsolationTest: false,
+    hasResourceIdIsolationTest: true,
+    notes: 'Get member attendance logs'
+  },
+  {
+    method: 'GET',
+    url: '/api/gyms/:gymId/registration-requests',
+    isTenantScoped: true,
+    hasPathIsolationTest: true,
+    hasBodyIsolationTest: false,
+    hasResourceIdIsolationTest: false,
+    notes: 'List member registration requests'
+  },
+  {
+    method: 'POST',
+    url: '/api/gyms/:gymId/registration-requests/:requestId/approve',
+    isTenantScoped: true,
+    hasPathIsolationTest: true,
+    hasBodyIsolationTest: false,
+    hasResourceIdIsolationTest: true,
+    notes: 'Approve member registration request'
+  },
+  {
+    method: 'POST',
+    url: '/api/gyms/:gymId/registration-requests/:requestId/reject',
+    isTenantScoped: true,
+    hasPathIsolationTest: true,
+    hasBodyIsolationTest: true,
+    hasResourceIdIsolationTest: true,
+    notes: 'Reject member registration request'
   }
 ];
 
@@ -219,6 +293,10 @@ describe('Route Registry & Cross-Tenant Isolation Enforcement', () => {
   let subBId: string;
   let paymentAId: string;
   let paymentBId: string;
+  let attendanceAId: string;
+  let attendanceBId: string;
+  let requestAId: string;
+  let requestBId: string;
 
   beforeAll(async () => {
     pool = createPool();
@@ -372,9 +450,43 @@ describe('Route Registry & Cross-Tenant Isolation Enforcement', () => {
       }
     });
     paymentBId = JSON.parse(payBRes.payload).payment.id;
+
+    // Create Attendance in Gym A and Gym B
+    const attARes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymAId}/attendance/check-in`,
+      headers: { authorization: `Bearer ${ownerAToken}` },
+      payload: { memberId: memberAId }
+    });
+    attendanceAId = JSON.parse(attARes.payload).attendance.id;
+
+    const attBRes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymBId}/attendance/check-in`,
+      headers: { authorization: `Bearer ${ownerBToken}` },
+      payload: { memberId: memberBId }
+    });
+    attendanceBId = JSON.parse(attBRes.payload).attendance.id;
+
+    // Create Registration Requests in Gym A and Gym B
+    const regReqARes = await app.inject({
+      method: 'POST',
+      url: `/api/public/gyms/${gymAId}/register`,
+      payload: { firstName: 'RegAlice', phone: '+919444444441' }
+    });
+    requestAId = JSON.parse(regReqARes.payload).requestId;
+
+    const regReqBRes = await app.inject({
+      method: 'POST',
+      url: `/api/public/gyms/${gymBId}/register`,
+      payload: { firstName: 'RegBob', phone: '+919444444442' }
+    });
+    requestBId = JSON.parse(regReqBRes.payload).requestId;
   });
 
   afterAll(async () => {
+    if (gymAId) await cleanupTenant(pool, gymAId);
+    if (gymBId) await cleanupTenant(pool, gymBId);
     await app.close();
   });
 
@@ -490,6 +602,14 @@ describe('Route Registry & Cross-Tenant Isolation Enforcement', () => {
     });
     expect(patchPlanRes.statusCode).toBe(403);
 
+    // 9b. DELETE /api/gyms/:gymId/plans/:planId
+    const deletePlanRes = await app.inject({
+      method: 'DELETE',
+      url: `/api/gyms/${gymAId}/plans/${planAId}`,
+      headers: { authorization: `Bearer ${ownerBToken}` }
+    });
+    expect(deletePlanRes.statusCode).toBe(403);
+
     // 10. GET /api/gyms/:gymId/members/:memberId/subscriptions
     const listSubsRes = await app.inject({
       method: 'GET',
@@ -572,6 +692,65 @@ describe('Route Registry & Cross-Tenant Isolation Enforcement', () => {
       headers: { authorization: `Bearer ${ownerBToken}` }
     });
     expect(financialsRes.statusCode).toBe(403);
+
+    // 19. POST /api/gyms/:gymId/attendance/check-in
+    const checkInPathRes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymAId}/attendance/check-in`,
+      headers: { authorization: `Bearer ${ownerBToken}` },
+      payload: { memberId: memberAId }
+    });
+    expect(checkInPathRes.statusCode).toBe(403);
+
+    // 20. POST /api/gyms/:gymId/attendance/:attendanceId/void
+    const voidPathRes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymAId}/attendance/${attendanceAId}/void`,
+      headers: { authorization: `Bearer ${ownerBToken}` },
+      payload: { voidReason: 'Cross tenant test' }
+    });
+    expect(voidPathRes.statusCode).toBe(403);
+
+    // 21. GET /api/gyms/:gymId/attendance
+    const listAttPathRes = await app.inject({
+      method: 'GET',
+      url: `/api/gyms/${gymAId}/attendance`,
+      headers: { authorization: `Bearer ${ownerBToken}` }
+    });
+    expect(listAttPathRes.statusCode).toBe(403);
+
+    // 22. GET /api/gyms/:gymId/members/:memberId/attendance
+    const memberAttPathRes = await app.inject({
+      method: 'GET',
+      url: `/api/gyms/${gymAId}/members/${memberAId}/attendance`,
+      headers: { authorization: `Bearer ${ownerBToken}` }
+    });
+    expect(memberAttPathRes.statusCode).toBe(403);
+
+    // 23. GET /api/gyms/:gymId/registration-requests
+    const listReqPathRes = await app.inject({
+      method: 'GET',
+      url: `/api/gyms/${gymAId}/registration-requests`,
+      headers: { authorization: `Bearer ${ownerBToken}` }
+    });
+    expect(listReqPathRes.statusCode).toBe(403);
+
+    // 24. POST /api/gyms/:gymId/registration-requests/:requestId/approve
+    const approveReqPathRes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymAId}/registration-requests/${requestAId}/approve`,
+      headers: { authorization: `Bearer ${ownerBToken}` }
+    });
+    expect(approveReqPathRes.statusCode).toBe(403);
+
+    // 25. POST /api/gyms/:gymId/registration-requests/:requestId/reject
+    const rejectReqPathRes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymAId}/registration-requests/${requestAId}/reject`,
+      headers: { authorization: `Bearer ${ownerBToken}` },
+      payload: { reason: 'Cross-tenant path attempt' }
+    });
+    expect(rejectReqPathRes.statusCode).toBe(403);
   });
 
   // Verification of Body Isolation (Payload injection with foreign gym ID)
@@ -675,6 +854,45 @@ describe('Route Registry & Cross-Tenant Isolation Enforcement', () => {
     });
     expect(refundBodyRes.statusCode).toBe(403);
     expect(JSON.parse(refundBodyRes.payload).error).toMatch(/Cross-tenant violation/i);
+
+    // POST /api/gyms/:gymId/attendance/check-in with body gymId = gymBId
+    const checkInBodyRes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymAId}/attendance/check-in`,
+      headers: { authorization: `Bearer ${ownerAToken}` },
+      payload: {
+        memberId: memberAId,
+        gymId: gymBId
+      }
+    });
+    expect(checkInBodyRes.statusCode).toBe(403);
+    expect(JSON.parse(checkInBodyRes.payload).error).toMatch(/Cross-tenant violation/i);
+
+    // POST /api/gyms/:gymId/attendance/:attendanceId/void with body gymId = gymBId
+    const voidBodyRes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymAId}/attendance/${attendanceAId}/void`,
+      headers: { authorization: `Bearer ${ownerAToken}` },
+      payload: {
+        voidReason: 'Cross tenant body injection test',
+        gymId: gymBId
+      }
+    });
+    expect(voidBodyRes.statusCode).toBe(403);
+    expect(JSON.parse(voidBodyRes.payload).error).toMatch(/Cross-tenant violation/i);
+
+    // POST /api/gyms/:gymId/registration-requests/:requestId/reject with body gymId = gymBId
+    const rejectBodyRes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymAId}/registration-requests/${requestAId}/reject`,
+      headers: { authorization: `Bearer ${ownerAToken}` },
+      payload: {
+        reason: 'Cross tenant body injection test',
+        gymId: gymBId
+      }
+    });
+    expect(rejectBodyRes.statusCode).toBe(403);
+    expect(JSON.parse(rejectBodyRes.payload).error).toMatch(/Cross-tenant violation/i);
   });
 
   // Verification of Resource-ID Cross-Tenant Isolation
@@ -725,6 +943,15 @@ describe('Route Registry & Cross-Tenant Isolation Enforcement', () => {
     });
     expect(patchPlanRes.statusCode).toBe(404);
     expect(JSON.parse(patchPlanRes.payload).error).toMatch(/not found in this gym/i);
+
+    // DELETE /api/gyms/:gymId/plans/:planId where plan belongs to Gym B, but deleted under Gym A
+    const deletePlanRes = await app.inject({
+      method: 'DELETE',
+      url: `/api/gyms/${gymAId}/plans/${planBId}`,
+      headers: { authorization: `Bearer ${ownerAToken}` }
+    });
+    expect(deletePlanRes.statusCode).toBe(404);
+    expect(JSON.parse(deletePlanRes.payload).error).toMatch(/not found in this gym/i);
 
     // GET /api/gyms/:gymId/members/:memberId/subscriptions where member belongs to Gym B
     const getMemberSubsRes = await app.inject({
@@ -803,5 +1030,45 @@ describe('Route Registry & Cross-Tenant Isolation Enforcement', () => {
     });
     expect(getFinancialsRes.statusCode).toBe(404);
     expect(JSON.parse(getFinancialsRes.payload).error).toMatch(/not found in this gym/i);
+
+    // POST /api/gyms/:gymId/attendance/:attendanceId/void where attendance belongs to Gym B
+    const voidResIdRes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymAId}/attendance/${attendanceBId}/void`,
+      headers: { authorization: `Bearer ${ownerAToken}` },
+      payload: {
+        voidReason: 'Tampering void across gym'
+      }
+    });
+    expect(voidResIdRes.statusCode).toBe(404);
+    expect(JSON.parse(voidResIdRes.payload).error).toMatch(/not found in this gym/i);
+
+    // GET /api/gyms/:gymId/members/:memberId/attendance where member belongs to Gym B
+    const memberAttResIdRes = await app.inject({
+      method: 'GET',
+      url: `/api/gyms/${gymAId}/members/${memberBId}/attendance`,
+      headers: { authorization: `Bearer ${ownerAToken}` }
+    });
+    expect(memberAttResIdRes.statusCode).toBe(404);
+    expect(JSON.parse(memberAttResIdRes.payload).error).toMatch(/not found in this gym/i);
+
+    // POST /api/gyms/:gymId/registration-requests/:requestId/approve where request belongs to Gym B
+    const approveResIdRes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymAId}/registration-requests/${requestBId}/approve`,
+      headers: { authorization: `Bearer ${ownerAToken}` }
+    });
+    expect(approveResIdRes.statusCode).toBe(404);
+    expect(JSON.parse(approveResIdRes.payload).error).toMatch(/not found/i);
+
+    // POST /api/gyms/:gymId/registration-requests/:requestId/reject where request belongs to Gym B
+    const rejectResIdRes = await app.inject({
+      method: 'POST',
+      url: `/api/gyms/${gymAId}/registration-requests/${requestBId}/reject`,
+      headers: { authorization: `Bearer ${ownerAToken}` },
+      payload: { reason: 'Cross tenant reject test' }
+    });
+    expect(rejectResIdRes.statusCode).toBe(404);
+    expect(JSON.parse(rejectResIdRes.payload).error).toMatch(/not found/i);
   });
 });

@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 import type pg from 'pg';
-import { withTenantContext, members, membershipPlans, subscriptions, paymentTransactions, attendanceLogs, eq, and, or, ilike, isNull, desc, sql } from '@gym/db';
-import { PaymentRecordSchema, RefundRecordSchema, AttendanceCheckInSchema, AttendanceVoidSchema } from '@gym/shared';
+import { withTenantContext, members, memberRegistrationRequests, membershipPlans, subscriptions, paymentTransactions, attendanceLogs, eq, and, or, ilike, isNull, desc, sql } from '@gym/db';
+import { PaymentRecordSchema, RefundRecordSchema, AttendanceCheckInSchema, AttendanceVoidSchema, MemberRegistrationRejectSchema } from '@gym/shared';
 import { authenticateUser, createRequireTenantMembership } from '../middleware/auth.js';
 import { generateRandomToken, hashToken, hashPassword } from '../auth/crypto.js';
 
@@ -638,7 +638,7 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
     const tenantContext = req.tenantContext!;
 
     const result = await withTenantContext(pool, tenantContext, async (tx) => {
-      const conditions = [eq(membershipPlans.gymId, gymId)];
+      const conditions = [eq(membershipPlans.gymId, gymId), isNull(membershipPlans.deletedAt)];
       if (active === 'true') {
         conditions.push(eq(membershipPlans.isActive, true));
       } else if (active === 'false') {
@@ -677,8 +677,8 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
       return reply.status(403).send({ error: 'Cross-tenant violation: body gymId does not match route gymId' });
     }
 
-    // Role check: only owner or manager can create plans
-    if (tenantContext.role !== 'owner' && tenantContext.role !== 'manager') {
+    // Role check: only owner, manager, or superadmin can create plans
+    if (tenantContext.role !== 'owner' && tenantContext.role !== 'manager' && !req.user?.isPlatformAdmin) {
       return reply.status(403).send({ error: 'Forbidden: Only owners and managers can create membership plans' });
     }
 
@@ -723,7 +723,7 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
       const rows = await tx
         .select()
         .from(membershipPlans)
-        .where(and(eq(membershipPlans.gymId, gymId), eq(membershipPlans.id, planId)))
+        .where(and(eq(membershipPlans.gymId, gymId), eq(membershipPlans.id, planId), isNull(membershipPlans.deletedAt)))
         .limit(1);
       return rows[0] || null;
     });
@@ -758,8 +758,8 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
       return reply.status(403).send({ error: 'Cross-tenant violation: body gymId does not match route gymId' });
     }
 
-    // Role check: only owner or manager can update plans
-    if (tenantContext.role !== 'owner' && tenantContext.role !== 'manager') {
+    // Role check: only owner, manager, or superadmin can update plans
+    if (tenantContext.role !== 'owner' && tenantContext.role !== 'manager' && !req.user?.isPlatformAdmin) {
       return reply.status(403).send({ error: 'Forbidden: Only owners and managers can update membership plans' });
     }
 
@@ -799,7 +799,7 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
       const [updated] = await tx
         .update(membershipPlans)
         .set(updates)
-        .where(and(eq(membershipPlans.gymId, gymId), eq(membershipPlans.id, planId)))
+        .where(and(eq(membershipPlans.gymId, gymId), eq(membershipPlans.id, planId), isNull(membershipPlans.deletedAt)))
         .returning();
       return updated || null;
     });
@@ -809,6 +809,74 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
     }
 
     return reply.send({ plan: updatedPlan });
+  });
+
+  // 9b. Delete Membership Plan (Owner, Manager, or Superadmin only)
+  fastify.delete<{
+    Params: { gymId: string; planId: string };
+  }>('/:gymId/plans/:planId', {
+    preHandler: [authenticateUser, requireTenant]
+  }, async (req, reply) => {
+    const { gymId, planId } = req.params;
+    const tenantContext = req.tenantContext!;
+
+    // Role check: only owner, manager, or superadmin can delete plans
+    if (tenantContext.role !== 'owner' && tenantContext.role !== 'manager' && !req.user?.isPlatformAdmin) {
+      return reply.status(403).send({ error: 'Forbidden: Only owners and managers can delete membership plans' });
+    }
+
+    const result = await withTenantContext(pool, tenantContext, async (tx) => {
+      // Verify plan exists in this gym and is not already deleted
+      const [existingPlan] = await tx
+        .select()
+        .from(membershipPlans)
+        .where(and(eq(membershipPlans.gymId, gymId), eq(membershipPlans.id, planId), isNull(membershipPlans.deletedAt)))
+        .limit(1);
+
+      if (!existingPlan) {
+        return { notFound: true };
+      }
+
+      // Check if any subscriptions reference this plan
+      const subRows = await tx
+        .select({ count: sql<number>`count(*)::int` })
+        .from(subscriptions)
+        .where(and(eq(subscriptions.gymId, gymId), eq(subscriptions.planId, planId)));
+
+      const subCount = Number(subRows[0]?.count || 0);
+
+      if (subCount > 0) {
+        // Soft delete/archive to preserve historical subscription and financial records
+        await tx
+          .update(membershipPlans)
+          .set({
+            deletedAt: new Date(),
+            isActive: false
+          })
+          .where(and(eq(membershipPlans.gymId, gymId), eq(membershipPlans.id, planId)));
+
+        return { success: true, archived: true, subCount };
+      } else {
+        // Hard delete unreferenced plan
+        await tx
+          .delete(membershipPlans)
+          .where(and(eq(membershipPlans.gymId, gymId), eq(membershipPlans.id, planId)));
+
+        return { success: true, deleted: true, subCount: 0 };
+      }
+    });
+
+    if (result.notFound) {
+      return reply.status(404).send({ error: 'Membership plan not found in this gym' });
+    }
+
+    return reply.send({
+      success: true,
+      message: result.archived
+        ? 'Membership plan archived successfully (preserved for historical subscriptions).'
+        : 'Membership plan deleted successfully.',
+      archived: Boolean(result.archived)
+    });
   });
 
   // 10. List Member Subscriptions
@@ -1079,8 +1147,8 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
       return reply.status(403).send({ error: 'Cross-tenant violation: body gymId does not match route gymId' });
     }
 
-    // Role check: only owner or manager can cancel subscriptions
-    if (tenantContext.role !== 'owner' && tenantContext.role !== 'manager') {
+    // Role check: only owner, manager, or superadmin can cancel subscriptions
+    if (tenantContext.role !== 'owner' && tenantContext.role !== 'manager' && !req.user?.isPlatformAdmin) {
       return reply.status(403).send({ error: 'Forbidden: Only owners and managers can cancel subscriptions' });
     }
 
@@ -1828,5 +1896,163 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
     }
 
     return reply.send(result);
+  });
+
+  // 17. List Member Registration Requests
+  fastify.get<{
+    Params: { gymId: string };
+    Querystring: { status?: string };
+  }>('/:gymId/registration-requests', {
+    preHandler: [authenticateUser, requireTenant]
+  }, async (req, reply) => {
+    const { gymId } = req.params;
+    const tenantContext = req.tenantContext!;
+    const { status } = req.query;
+
+    const rows = await withTenantContext(pool, tenantContext, async (tx) => {
+      const conditions = [eq(memberRegistrationRequests.gymId, gymId)];
+      if (status && ['pending', 'approved', 'rejected'].includes(status)) {
+        conditions.push(eq(memberRegistrationRequests.status, status));
+      }
+
+      return tx
+        .select()
+        .from(memberRegistrationRequests)
+        .where(and(...conditions))
+        .orderBy(desc(memberRegistrationRequests.createdAt));
+    });
+
+    return reply.send({ requests: rows, count: rows.length });
+  });
+
+  // 18. Approve Member Registration Request
+  fastify.post<{
+    Params: { gymId: string; requestId: string };
+  }>('/:gymId/registration-requests/:requestId/approve', {
+    preHandler: [authenticateUser, requireTenant]
+  }, async (req, reply) => {
+    const { gymId, requestId } = req.params;
+    const tenantContext = req.tenantContext!;
+
+    const isAuthorized = req.user?.isPlatformAdmin || tenantContext.role === 'owner' || tenantContext.role === 'manager';
+    if (!isAuthorized) {
+      return reply.status(403).send({ error: 'Only gym owners or managers can approve registration requests' });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query("SELECT set_config('app.gym_id', $1, true);", [gymId]);
+      await client.query("SELECT set_config('app.user_id', $1, true);", [tenantContext.userId]);
+
+      const res = await client.query<{ approve_member_registration_request: string }>(
+        'SELECT approve_member_registration_request($1, $2, $3) as approve_member_registration_request;',
+        [gymId, requestId, tenantContext.userId]
+      );
+      const memberId = res.rows[0]?.approve_member_registration_request;
+
+      // Fetch the newly created member
+      const memberRes = await client.query<{
+        id: string;
+        gym_id: string;
+        member_number: string;
+        first_name: string;
+        last_name: string | null;
+        phone: string;
+        email: string | null;
+        gender: string;
+        status: string;
+        joined_date: string;
+      }>(
+        'SELECT id, gym_id, member_number, first_name, last_name, phone, email, gender, status, joined_date FROM members WHERE gym_id = $1 AND id = $2;',
+        [gymId, memberId]
+      );
+      const m = memberRes.rows[0];
+      const memberObj = m ? {
+        id: m.id,
+        gymId: m.gym_id,
+        memberNumber: m.member_number,
+        firstName: m.first_name,
+        lastName: m.last_name,
+        phone: m.phone,
+        email: m.email,
+        gender: m.gender,
+        status: m.status,
+        joinedDate: m.joined_date
+      } : null;
+
+      await client.query('COMMIT');
+
+      return reply.send({
+        success: true,
+        memberId,
+        member: memberObj,
+        message: 'Registration request approved and member enrolled successfully.'
+      });
+    } catch (err: unknown) {
+      await client.query('ROLLBACK');
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('not found')) {
+        return reply.status(404).send({ error: msg });
+      }
+      if (msg.includes('already exists') || msg.includes('already approved') || msg.includes('already rejected') || msg.includes('already')) {
+        return reply.status(409).send({ error: msg });
+      }
+      return reply.status(400).send({ error: msg });
+    } finally {
+      client.release();
+    }
+  });
+
+  // 19. Reject Member Registration Request
+  fastify.post<{
+    Params: { gymId: string; requestId: string };
+    Body: unknown;
+  }>('/:gymId/registration-requests/:requestId/reject', {
+    preHandler: [authenticateUser, requireTenant]
+  }, async (req, reply) => {
+    const { gymId, requestId } = req.params;
+    const tenantContext = req.tenantContext!;
+
+    const isAuthorized = req.user?.isPlatformAdmin || tenantContext.role === 'owner' || tenantContext.role === 'manager';
+    if (!isAuthorized) {
+      return reply.status(403).send({ error: 'Only gym owners or managers can reject registration requests' });
+    }
+
+    const parseRes = MemberRegistrationRejectSchema.safeParse(req.body || {});
+    if (!parseRes.success) {
+      return reply.status(400).send({ error: 'Invalid rejection payload' });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query("SELECT set_config('app.gym_id', $1, true);", [gymId]);
+      await client.query("SELECT set_config('app.user_id', $1, true);", [tenantContext.userId]);
+
+      await client.query(
+        'SELECT reject_member_registration_request($1, $2, $3, $4);',
+        [gymId, requestId, tenantContext.userId, parseRes.data.reason || null]
+      );
+
+      await client.query('COMMIT');
+
+      return reply.send({
+        success: true,
+        message: 'Registration request rejected.'
+      });
+    } catch (err: unknown) {
+      await client.query('ROLLBACK');
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('not found')) {
+        return reply.status(404).send({ error: msg });
+      }
+      if (msg.includes('already')) {
+        return reply.status(409).send({ error: msg });
+      }
+      return reply.status(400).send({ error: msg });
+    } finally {
+      client.release();
+    }
   });
 };

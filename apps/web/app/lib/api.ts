@@ -307,6 +307,13 @@ export interface CreateMembershipPlanInput {
   priceCents: number;
 }
 
+export interface UpdateMembershipPlanInput {
+  name?: string;
+  durationDays?: number;
+  priceCents?: number;
+  isActive?: boolean;
+}
+
 export interface SubscriptionItem {
   id: string;
   gymId: string;
@@ -377,6 +384,58 @@ export async function createMembershipPlan(
   if (!res.ok) {
     const errorBody = await res.json().catch(() => ({}));
     throw new Error(errorBody.error || `Failed to create plan: ${res.statusText}`);
+  }
+
+  return res.json();
+}
+
+export async function updateMembershipPlan(
+  gymId: string,
+  planId: string,
+  input: UpdateMembershipPlanInput,
+  token?: string
+): Promise<{ plan: MembershipPlan }> {
+  const activeToken = token || (typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined);
+  if (!activeToken) throw new Error('Authentication required');
+
+  const url = `${getApiBaseUrl()}/gyms/${gymId}/plans/${planId}`;
+  const res = await fetch(url, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${activeToken}`
+    },
+    body: JSON.stringify(input)
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(errorBody.error || `Failed to update plan: ${res.statusText}`);
+  }
+
+  return res.json();
+}
+
+export async function deleteMembershipPlan(
+  gymId: string,
+  planId: string,
+  token?: string
+): Promise<{ success: boolean; message?: string; archived?: boolean }> {
+  const activeToken = token || (typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined);
+  if (!activeToken) throw new Error('Authentication required');
+
+  const url = `${getApiBaseUrl()}/gyms/${gymId}/plans/${planId}`;
+  const res = await fetch(url, {
+    method: 'DELETE',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${activeToken}`
+    }
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(errorBody.error || `Failed to delete plan: ${res.statusText}`);
   }
 
   return res.json();
@@ -645,6 +704,295 @@ export async function fetchMemberFinancials(
   if (!res.ok) {
     const errorBody = await res.json().catch(() => ({}));
     throw new Error(errorBody.error || `Failed to fetch financials: ${res.statusText}`);
+  }
+
+  return res.json();
+}
+
+export interface AttendanceLogItem {
+  id: string;
+  gymId: string;
+  memberId: string;
+  attendanceDate: string;
+  checkInTime: string;
+  method: 'staff_manual' | 'qr_kiosk';
+  recordedByUserId: string;
+  wasOverride: boolean;
+  overrideReason?: 'medical_clearance_pending' | 'payment_promised_today' | 'forgot_wallet' | 'guest_pass' | 'other_owner_approved' | null;
+  isVoided: boolean;
+  voidedAt?: string | null;
+  voidedByUserId?: string | null;
+  voidReason?: string | null;
+  createdAt: string;
+  memberFirstName?: string;
+  memberLastName?: string;
+  memberNumber?: string;
+  memberPhone?: string;
+}
+
+export interface MemberAttendanceSummary {
+  member: {
+    id: string;
+    firstName: string;
+    lastName: string | null;
+    memberNumber: string;
+  };
+  summary: {
+    totalCheckIns: number;
+    checkInsThisMonth: number;
+  };
+  attendance: AttendanceLogItem[];
+}
+
+export async function fetchAttendance(
+  gymId: string,
+  options?: { date?: string; memberId?: string; limit?: number; offset?: number },
+  token?: string
+): Promise<{ attendance: AttendanceLogItem[]; total: number; limit: number; offset: number }> {
+  const activeToken = token || (typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined);
+  if (!activeToken) throw new Error('Authentication required');
+
+  const queryParams = new URLSearchParams();
+  if (options?.date) queryParams.set('date', options.date);
+  if (options?.memberId) queryParams.set('memberId', options.memberId);
+  if (options?.limit) queryParams.set('limit', String(options.limit));
+  if (options?.offset) queryParams.set('offset', String(options.offset));
+
+  const url = `${getApiBaseUrl()}/gyms/${gymId}/attendance?${queryParams.toString()}`;
+  const res = await fetch(url, {
+    headers: {
+      'Authorization': `Bearer ${activeToken}`
+    }
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(errorBody.error || `Failed to fetch attendance logs: ${res.statusText}`);
+  }
+
+  return res.json();
+}
+
+export async function recordCheckIn(
+  gymId: string,
+  payload: {
+    memberId: string;
+    method?: 'staff_manual' | 'qr_kiosk';
+    wasOverride?: boolean;
+    overrideReason?: string | null;
+  },
+  token?: string
+): Promise<{ attendance: AttendanceLogItem }> {
+  const activeToken = token || (typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined);
+  if (!activeToken) throw new Error('Authentication required');
+
+  const url = `${getApiBaseUrl()}/gyms/${gymId}/attendance/check-in`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${activeToken}`
+    },
+    body: JSON.stringify(payload)
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(errorBody.error || `Failed to record check-in: ${res.statusText}`);
+  }
+
+  return res.json();
+}
+
+export async function voidAttendance(
+  gymId: string,
+  attendanceId: string,
+  payload: { voidReason: string },
+  token?: string
+): Promise<{ success: boolean; message: string }> {
+  const activeToken = token || (typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined);
+  if (!activeToken) throw new Error('Authentication required');
+
+  const url = `${getApiBaseUrl()}/gyms/${gymId}/attendance/${attendanceId}/void`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${activeToken}`
+    },
+    body: JSON.stringify(payload)
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(errorBody.error || `Failed to void attendance: ${res.statusText}`);
+  }
+
+  return res.json();
+}
+
+export async function fetchMemberAttendance(
+  gymId: string,
+  memberId: string,
+  token?: string
+): Promise<MemberAttendanceSummary> {
+  const activeToken = token || (typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined);
+  if (!activeToken) throw new Error('Authentication required');
+
+  const url = `${getApiBaseUrl()}/gyms/${gymId}/members/${memberId}/attendance`;
+  const res = await fetch(url, {
+    headers: {
+      'Authorization': `Bearer ${activeToken}`
+    }
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(errorBody.error || `Failed to fetch member attendance: ${res.statusText}`);
+  }
+
+  return res.json();
+}
+
+export interface MemberRegistrationRequest {
+  id: string;
+  gymId: string;
+  firstName: string;
+  lastName: string | null;
+  phone: string;
+  email: string | null;
+  gender: string;
+  dateOfBirth: string | null;
+  emergencyContactName: string | null;
+  emergencyContactPhone: string | null;
+  notes: string | null;
+  status: 'pending' | 'approved' | 'rejected';
+  reviewedByUserId: string | null;
+  reviewedAt: string | null;
+  rejectionReason: string | null;
+  enrolledMemberId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PublicGymInfo {
+  id: string;
+  name: string;
+  slug: string;
+  defaultCountry: string;
+  currency: string;
+  timezone: string;
+}
+
+export async function fetchPublicGymInfo(gymSlugOrId: string): Promise<PublicGymInfo> {
+  const url = `${getApiBaseUrl()}/public/gyms/${encodeURIComponent(gymSlugOrId)}/info`;
+  const res = await fetch(url);
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(errorBody.error || `Failed to fetch gym info: ${res.statusText}`);
+  }
+
+  return res.json();
+}
+
+export async function submitPublicRegistration(
+  gymSlugOrId: string,
+  payload: {
+    firstName: string;
+    lastName?: string | null;
+    phone: string;
+    email?: string | null;
+    gender?: string;
+    dateOfBirth?: string | null;
+    emergencyContactName?: string | null;
+    emergencyContactPhone?: string | null;
+    notes?: string | null;
+  }
+): Promise<{ success: boolean; requestId: string; gymName: string; message: string }> {
+  const url = `${getApiBaseUrl()}/public/gyms/${encodeURIComponent(gymSlugOrId)}/register`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(errorBody.error || `Registration failed: ${res.statusText}`);
+  }
+
+  return res.json();
+}
+
+export async function fetchRegistrationRequests(
+  gymId: string,
+  status?: string,
+  token?: string
+): Promise<{ requests: MemberRegistrationRequest[]; count: number }> {
+  const activeToken = token || (typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined);
+  if (!activeToken) throw new Error('Authentication required');
+
+  const url = `${getApiBaseUrl()}/gyms/${gymId}/registration-requests${status ? `?status=${encodeURIComponent(status)}` : ''}`;
+  const res = await fetch(url, {
+    headers: { 'Authorization': `Bearer ${activeToken}` }
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(errorBody.error || `Failed to fetch registration requests: ${res.statusText}`);
+  }
+
+  return res.json();
+}
+
+export async function approveRegistrationRequest(
+  gymId: string,
+  requestId: string,
+  token?: string
+): Promise<{ success: boolean; memberId: string; member: Member; message: string }> {
+  const activeToken = token || (typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined);
+  if (!activeToken) throw new Error('Authentication required');
+
+  const url = `${getApiBaseUrl()}/gyms/${gymId}/registration-requests/${requestId}/approve`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${activeToken}`
+    }
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(errorBody.error || `Failed to approve registration: ${res.statusText}`);
+  }
+
+  return res.json();
+}
+
+export async function rejectRegistrationRequest(
+  gymId: string,
+  requestId: string,
+  reason?: string,
+  token?: string
+): Promise<{ success: boolean; message: string }> {
+  const activeToken = token || (typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined);
+  if (!activeToken) throw new Error('Authentication required');
+
+  const url = `${getApiBaseUrl()}/gyms/${gymId}/registration-requests/${requestId}/reject`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${activeToken}`
+    },
+    body: JSON.stringify({ reason })
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(errorBody.error || `Failed to reject registration: ${res.statusText}`);
   }
 
   return res.json();

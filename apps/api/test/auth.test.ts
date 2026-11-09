@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { buildApp } from '../src/app.js';
 import type { FastifyInstance } from 'fastify';
-import { createPool } from '@gym/db';
+import { createPool, cleanupTenant } from '@gym/db';
 import type pg from 'pg';
 import { resetAccountThrottler } from '../src/auth/routes.js';
 import { hashPassword } from '../src/auth/crypto.js';
@@ -9,6 +9,7 @@ import { hashPassword } from '../src/auth/crypto.js';
 describe('Auth & Session System', () => {
   let app: FastifyInstance;
   let pool: pg.Pool;
+  const createdGymIds: string[] = [];
 
   const testPhone = `+91987${Math.floor(1000000 + Math.random() * 9000000)}`;
   const testPassword = 'StrongPassword123!';
@@ -32,6 +33,9 @@ describe('Auth & Session System', () => {
   });
 
   afterAll(async () => {
+    for (const gid of createdGymIds) {
+      await cleanupTenant(pool, gid);
+    }
     await app.close();
   });
 
@@ -220,6 +224,7 @@ describe('Auth & Session System', () => {
       payload: { name: 'Iron Palace', slug: `iron-palace-${Date.now()}` }
     });
     const gymId = gymRes.json().gymId;
+    createdGymIds.push(gymId);
 
     // Register a staff user in DB and link as staff in gym
     const staffPhone = `+91771${Date.now().toString().slice(-7)}`;
@@ -395,6 +400,7 @@ describe('Auth & Session System', () => {
 
     expect(provisionRes.statusCode).toBe(201);
     const provisionBody = provisionRes.json();
+    createdGymIds.push(provisionBody.gymId);
     expect(provisionBody.gymId).toBeDefined();
     expect(provisionBody.name).toBe('Super Gym Elite');
     expect(provisionBody.adminUser.phone).toBe(newAdminPhone);
@@ -471,6 +477,7 @@ describe('Auth & Session System', () => {
     });
     expect(gym1Res.statusCode).toBe(201);
     const gym1Id = gym1Res.json().gymId;
+    createdGymIds.push(gym1Id);
 
     // Provision Gym 2 with Password B (same user/email, different password)
     const gym2Res = await app.inject({
@@ -488,6 +495,7 @@ describe('Auth & Session System', () => {
     });
     expect(gym2Res.statusCode).toBe(201);
     const gym2Id = gym2Res.json().gymId;
+    createdGymIds.push(gym2Id);
 
     // 9a. Log in using email and Password A -> Only Gym 1 is unlocked
     const loginGym1 = await app.inject({

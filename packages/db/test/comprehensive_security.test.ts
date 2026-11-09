@@ -3,6 +3,7 @@ import type pg from 'pg';
 import crypto from 'node:crypto';
 import { createPool } from '../src/client.js';
 import { assertDatabaseRole } from '../src/assertRole.js';
+import { cleanupTenant } from '../src/cleanup.js';
 
 describe('Comprehensive Database Security & Isolation Suite (TypeScript Native)', () => {
   let pool: pg.Pool;
@@ -83,6 +84,9 @@ describe('Comprehensive Database Security & Isolation Suite (TypeScript Native)'
   });
 
   afterAll(async () => {
+    if (testGymId) {
+      await cleanupTenant(pool, testGymId);
+    }
     await pool.end();
   });
 

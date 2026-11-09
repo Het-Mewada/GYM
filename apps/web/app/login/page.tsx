@@ -96,6 +96,7 @@ export default function LoginPage() {
         if (typeof window !== 'undefined') {
           localStorage.setItem('gym_id', res.memberships[0].gym_id);
           localStorage.setItem('gym_name', res.memberships[0].gym_name || 'Gym');
+          localStorage.setItem('user_role', res.memberships[0].role);
         }
         router.push('/members');
         return;
@@ -119,6 +120,7 @@ export default function LoginPage() {
     if (typeof window !== 'undefined') {
       localStorage.setItem('gym_id', membership.gym_id);
       localStorage.setItem('gym_name', membership.gym_name || 'Gym');
+      localStorage.setItem('user_role', membership.role);
     }
     setShowSelectTenantModal(false);
     router.push('/members');

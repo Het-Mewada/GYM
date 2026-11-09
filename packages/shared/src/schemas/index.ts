@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { OVERRIDE_REASONS, PAYMENT_METHODS } from '../constants/index.js';
+import { OVERRIDE_REASONS, PAYMENT_METHODS, ATTENDANCE_METHODS } from '../constants/index.js';
 
 export const PhoneSchema = z.string().regex(/^\+[1-9]\d{6,14}$/, {
   message: 'Phone number must be a valid E.164 formatted string with leading +'
@@ -79,3 +79,43 @@ export const SubscriptionCreateSchema = z.object({
 export type MembershipPlanCreateInput = z.infer<typeof MembershipPlanCreateSchema>;
 export type MembershipPlanUpdateInput = z.infer<typeof MembershipPlanUpdateSchema>;
 export type SubscriptionCreateInput = z.infer<typeof SubscriptionCreateSchema>;
+
+export const AttendanceCheckInSchema = z.object({
+  memberId: z.string().uuid('Invalid member ID'),
+  method: z.enum(ATTENDANCE_METHODS).default('staff_manual'),
+  wasOverride: z.boolean().default(false),
+  overrideReason: z.enum(OVERRIDE_REASONS).optional().nullable()
+}).refine(
+  (data) => !data.wasOverride || (data.overrideReason !== undefined && data.overrideReason !== null),
+  {
+    message: 'Override reason is required when wasOverride is true',
+    path: ['overrideReason']
+  }
+);
+
+export const AttendanceVoidSchema = z.object({
+  voidReason: z.string().min(3, 'Void reason must be at least 3 characters').max(255)
+});
+
+export type AttendanceCheckInInput = z.infer<typeof AttendanceCheckInSchema>;
+export type AttendanceVoidInput = z.infer<typeof AttendanceVoidSchema>;
+
+export const MemberRegistrationRequestSchema = z.object({
+  firstName: z.string().min(1, 'First name is required').max(50),
+  lastName: z.string().max(50).optional().nullable(),
+  phone: PhoneSchema,
+  email: z.string().email('Invalid email address').optional().nullable(),
+  gender: z.enum(['male', 'female', 'other', 'unspecified']).default('unspecified'),
+  dateOfBirth: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date must be formatted as YYYY-MM-DD').optional().nullable(),
+  emergencyContactName: z.string().max(100).optional().nullable(),
+  emergencyContactPhone: PhoneSchema.optional().nullable(),
+  notes: z.string().max(500).optional().nullable()
+});
+
+export const MemberRegistrationRejectSchema = z.object({
+  reason: z.string().max(255).optional().nullable()
+});
+
+export type MemberRegistrationRequestInput = z.infer<typeof MemberRegistrationRequestSchema>;
+export type MemberRegistrationRejectInput = z.infer<typeof MemberRegistrationRejectSchema>;
+
