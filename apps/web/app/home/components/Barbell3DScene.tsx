@@ -174,14 +174,14 @@ function UltraRealistic3DLifter({ explodeProgress }: { explodeProgress: number }
     if (lArm && restQuats['mixamorigLeftArm']) lArm.quaternion.copy(restQuats['mixamorigLeftArm']).multiply(qArmL);
     if (rArm && restQuats['mixamorigRightArm']) rArm.quaternion.copy(restQuats['mixamorigRightArm']).multiply(qArmR);
 
-    // 8. Wrist orientation: overhand knuckles forward/up
-    const qHandL = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.25, 0.1, -0.15, 'XYZ'));
-    const qHandR = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.25, -0.1, 0.15, 'XYZ'));
+    // 8. Wrist orientation: pronated (overhand power grip), knuckles horizontal along barbell axis
+    const qHandL = new THREE.Quaternion().setFromEuler(new THREE.Euler(1.20, 1.20, -0.60, 'XYZ'));
+    const qHandR = new THREE.Quaternion().setFromEuler(new THREE.Euler(1.20, -1.20, 0.60, 'XYZ'));
     if (lHand && restQuats['mixamorigLeftHand']) lHand.quaternion.copy(restQuats['mixamorigLeftHand']).multiply(qHandL);
     if (rHand && restQuats['mixamorigRightHand']) rHand.quaternion.copy(restQuats['mixamorigRightHand']).multiply(qHandR);
 
     // 9. REALISTIC 5-FINGER POWER FISTS:
-    // Rotate joints around X to curl fingers firmly down and around the barbell shaft
+    // Knuckles aligned horizontally along barbell shaft; 4 fingers wrap over and under
     const fingers = ['Index', 'Middle', 'Ring', 'Pinky'];
     ['Left', 'Right'].forEach((side) => {
       fingers.forEach((finger) => {
@@ -189,17 +189,20 @@ function UltraRealistic3DLifter({ explodeProgress }: { explodeProgress: number }
         const b2 = bones[`mixamorig${side}Hand${finger}2`];
         const b3 = bones[`mixamorig${side}Hand${finger}3`];
         if (b1) b1.rotation.set(1.30, 0, 0);
-        if (b2) b2.rotation.set(1.45, 0, 0);
-        if (b3) b3.rotation.set(1.25, 0, 0);
+        if (b2) b2.rotation.set(1.50, 0, 0);
+        if (b3) b3.rotation.set(1.20, 0, 0);
       });
-      // Thumb wraps securely underneath the barbell
+      // 5th finger (Thumb) wraps securely from underneath and clasps over
+      const sign = side === 'Left' ? 1 : -1;
       const t1 = bones[`mixamorig${side}HandThumb1`];
       const t2 = bones[`mixamorig${side}HandThumb2`];
       const t3 = bones[`mixamorig${side}HandThumb3`];
-      const sign = side === 'Left' ? 1 : -1;
-      if (t1) t1.rotation.set(0.65, 0, -sign * 0.45);
-      if (t2) t2.rotation.set(0.55, 0, -sign * 0.35);
-      if (t3) t3.rotation.set(0.45, 0, -sign * 0.25);
+      if (t1 && restQuats[`mixamorig${side}HandThumb1`]) {
+        const qThumb1 = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.50, 0, sign * 0.35, 'XYZ'));
+        t1.quaternion.copy(restQuats[`mixamorig${side}HandThumb1`]).multiply(qThumb1);
+      }
+      if (t2) t2.rotation.set(0.85, 0, 0);
+      if (t3) t3.rotation.set(0.75, 0, 0);
     });
 
     // 10. Plant feet firmly on the floor at floorY = -1.90
@@ -349,11 +352,11 @@ function RealisticBarbellModel({ explodeProgress, liftProgress, mode }: BarbellS
       const crouch = 1.0 - p;
       const explodeFactor = Math.sin(p * Math.PI);
 
-      // Barbell position strictly matches the lifter's fists 20cm IN FRONT of tshirt:
-      // At crouch (p = 0): y = -0.68, z = +0.27 (well in front of shins & knees)
-      // At lockout (p = 1): y = -0.41, z = +0.25 (well in front of tshirt & thighs)
-      const barY = -0.41 - crouch * 0.27;
-      const barZ = 0.25 + crouch * 0.02;
+      // Barbell position strictly matches the lifter's fists:
+      // At lockout (p = 1, crouch = 0): y = -0.505, z = +0.220 (safely 5.7cm below t-shirt hem y=-0.448)
+      // At crouch (p = 0, crouch = 1): y = -0.770, z = +0.135 (safely in front of knees & shins)
+      const barY = -0.505 - crouch * 0.265;
+      const barZ = 0.220 - crouch * 0.085;
       groupRef.current.position.set(0, barY, barZ);
       groupRef.current.rotation.set(0, 0, Math.sin(t * 0.5) * 0.01);
 
