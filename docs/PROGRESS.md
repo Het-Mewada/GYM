@@ -50,14 +50,27 @@
   - Added Payments & Invoicing web UI (`/payments`), tax receipt / refund voucher view modals, and full Playwright E2E journey.
 
 ## In Progress
-- [ ] **Phase 3 Slice 4: Attendance Tracking**
+- [x] **Phase 3 Slice 4: Attendance Tracking, Multi-Tenant Auth & QR Registration**
   - Daily check-in / check-out with active subscription verification.
   - Partial unique index enforcement preventing multiple active check-ins per day.
-  - Manual voiding / re-checkin controls.
-  - Real-time attendance log web view and Playwright journey.
+  - Manual voiding / re-checkin controls with full audit logging.
+  - Override check-in flow for expired/missing subscriptions with mandatory reason tracking.
+  - Attendance web interface (`/attendance`) with real-time stats and date filters.
+  - Multi-tenant tenant switcher and gym-scoped credentials isolation.
+  - Front-desk QR code modal & public self-registration flow (`/join/:slug`) with approval queue.
+  - Authenticated route guards with automatic redirection to `/` and initial load protection.
+  - Replaced legacy notification banners with bottom-right toast system.
+  - Comprehensive test suite covering attendance, tenant isolation, and registration requests.
+
+## In Progress
+- [ ] **Phase 3 Slice 5: CSV Member Importer**
+  - Multipart/form-data upload with SHA-256 duplicate file hashing (`uq_csv_import_file_hash`).
+  - Column mapping validation (First Name, Last Name, Phone, Email, Gender, DOB).
+  - Transactional batching with PII-free error collection (`errors_json`).
+  - Web UI for CSV file upload, progress polling, and validation error inspection.
 
 ## Blocked
 - None.
 
 ## Next Up
-- Phase 3 Slice 5: CSV Member Importer with transactional batching and validation.
+- Phase 3 Slice 6: Automated Notifications & Communication Triggers (Resend email, WhatsApp direct click links).
