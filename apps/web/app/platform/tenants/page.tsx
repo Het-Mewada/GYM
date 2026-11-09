@@ -2,7 +2,15 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
-import { fetchPlatformTenants, createTenantWithAdmin, type TenantListItem, type CreateTenantInput } from '../../lib/api';
+import {
+  fetchPlatformTenants,
+  createTenantWithAdmin,
+  fetchPlatformMetrics,
+  type TenantListItem,
+  type CreateTenantInput,
+  type PlatformMetrics,
+  type PlatformActivityItem
+} from '../../lib/api';
 import { useToast } from '../../components/Toast';
 import { Navbar } from '../../components/Navbar';
 import { PhoneInput, parsePhone } from '../../components/PhoneInput';
@@ -21,6 +29,9 @@ export default function PlatformTenantsPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [platformMetrics, setPlatformMetrics] = useState<PlatformMetrics | null>(null);
+  const [platformActivity, setPlatformActivity] = useState<PlatformActivityItem[]>([]);
+  const [activeView, setActiveView] = useState<'tenants' | 'audit'>('tenants');
 
   // Modal & Form State
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -89,8 +100,15 @@ export default function PlatformTenantsPage() {
     setIsLoading(true);
     setError(null);
     try {
-      const res = await fetchPlatformTenants(token);
-      setTenants(res.tenants || []);
+      const [tenantsRes, metricsRes] = await Promise.all([
+        fetchPlatformTenants(token),
+        fetchPlatformMetrics(token).catch(() => null)
+      ]);
+      setTenants(tenantsRes.tenants || []);
+      if (metricsRes) {
+        setPlatformMetrics(metricsRes.metrics);
+        setPlatformActivity(metricsRes.recentActivity || []);
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to fetch platform tenants');
     } finally {
@@ -281,42 +299,77 @@ export default function PlatformTenantsPage() {
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
           <div className="p-4 rounded-xl bg-neutral-900 border border-neutral-800">
             <span className="text-[11px] font-semibold text-neutral-400 uppercase tracking-wider">Total Tenants</span>
-            <p className="text-2xl font-bold text-white mt-1">{tenants.length}</p>
+            <p className="text-2xl font-bold text-white mt-1">{platformMetrics?.totalTenants ?? tenants.length}</p>
           </div>
           <div className="p-4 rounded-xl bg-neutral-900 border border-neutral-800">
-            <span className="text-[11px] font-semibold text-neutral-400 uppercase tracking-wider">Default Region</span>
-            <p className="text-2xl font-bold text-white mt-1">India (IST / INR)</p>
+            <span className="text-[11px] font-semibold text-neutral-400 uppercase tracking-wider">Total Active Members</span>
+            <p className="text-2xl font-bold text-white mt-1">{platformMetrics?.totalMembers ?? '—'}</p>
           </div>
           <div className="p-4 rounded-xl bg-neutral-900 border border-neutral-800">
-            <span className="text-[11px] font-semibold text-neutral-400 uppercase tracking-wider">Isolation Mode</span>
-            <p className="text-2xl font-bold text-emerald-400 mt-1">Row-Level Security</p>
+            <span className="text-[11px] font-semibold text-neutral-400 uppercase tracking-wider">Platform Revenue</span>
+            <p className="text-2xl font-bold text-emerald-400 mt-1">
+              {platformMetrics ? `₹${(platformMetrics.totalRevenueCents / 100).toLocaleString('en-IN')}` : '—'}
+            </p>
           </div>
           <div className="p-4 rounded-xl bg-neutral-900 border border-neutral-800">
-            <span className="text-[11px] font-semibold text-neutral-400 uppercase tracking-wider">Current Admin</span>
-            <p className="text-sm font-bold text-neutral-200 mt-2 truncate">{userName || 'Platform Operator'}</p>
+            <span className="text-[11px] font-semibold text-neutral-400 uppercase tracking-wider">Today's Check-ins</span>
+            <p className="text-2xl font-bold text-emerald-400 mt-1">{platformMetrics?.totalCheckInsToday ?? '0'}</p>
           </div>
         </div>
 
-        {/* Search Bar */}
-        <div className="flex items-center gap-3">
-          <div className="relative flex-1">
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search by gym name, slug, or admin details..."
-              className="w-full px-4 py-2.5 rounded-xl bg-neutral-900 border border-neutral-800 text-sm text-neutral-100 placeholder-neutral-500 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition"
-            />
-          </div>
-          {searchQuery && (
-            <button
-              onClick={() => setSearchQuery('')}
-              className="px-3 py-2 text-xs text-neutral-400 hover:text-neutral-200 transition"
-            >
-              Clear
-            </button>
-          )}
+        {/* View Switcher Tabs */}
+        <div className="flex items-center gap-2 border-b border-neutral-800 pb-2">
+          <button
+            type="button"
+            onClick={() => setActiveView('tenants')}
+            className={`px-4 py-2 rounded-lg text-xs font-semibold transition cursor-pointer ${
+              activeView === 'tenants'
+                ? 'bg-neutral-800 text-white border border-neutral-700'
+                : 'text-neutral-400 hover:text-white'
+            }`}
+          >
+            Tenant Pods ({tenants.length})
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveView('audit')}
+            className={`px-4 py-2 rounded-lg text-xs font-semibold transition cursor-pointer flex items-center gap-2 ${
+              activeView === 'audit'
+                ? 'bg-neutral-800 text-white border border-neutral-700'
+                : 'text-neutral-400 hover:text-white'
+            }`}
+          >
+            <span>Live Audit Stream</span>
+            {platformActivity.length > 0 && (
+              <span className="px-1.5 py-0.5 rounded-full text-[10px] bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                {platformActivity.length}
+              </span>
+            )}
+          </button>
         </div>
+
+        {activeView === 'tenants' ? (
+          <>
+            {/* Search Bar */}
+            <div className="flex items-center gap-3">
+              <div className="relative flex-1">
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search by gym name, slug, or admin details..."
+                  className="w-full px-4 py-2.5 rounded-xl bg-neutral-900 border border-neutral-800 text-sm text-neutral-100 placeholder-neutral-500 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition"
+                />
+              </div>
+              {searchQuery && (
+                <button
+                  onClick={() => setSearchQuery('')}
+                  className="px-3 py-2 text-xs text-neutral-400 hover:text-neutral-200 transition"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
 
         {/* Tenant List Table */}
         <div className="border border-neutral-800 rounded-xl overflow-hidden bg-neutral-900/60 shadow-xl">
@@ -391,6 +444,64 @@ export default function PlatformTenantsPage() {
             </table>
           </div>
         </div>
+      </>
+    ) : (
+      /* Live Platform Audit Stream */
+      <div className="border border-neutral-800 rounded-xl overflow-hidden bg-neutral-900/60 shadow-xl">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-xs">
+            <thead className="bg-neutral-900 border-b border-neutral-800 text-neutral-400 uppercase tracking-wider font-semibold">
+              <tr>
+                <th className="py-3 px-4">Gym Tenant</th>
+                <th className="py-3 px-4">Action</th>
+                <th className="py-3 px-4">Entity</th>
+                <th className="py-3 px-4">Actor</th>
+                <th className="py-3 px-4">Timestamp</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-neutral-800/80">
+              {platformActivity.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="py-8 text-center text-neutral-500">
+                    No recent audit activity recorded yet across tenant pods.
+                  </td>
+                </tr>
+              ) : (
+                platformActivity.map((log) => (
+                  <tr key={log.id} className="hover:bg-neutral-800/30 transition">
+                    <td className="py-3.5 px-4 font-semibold text-neutral-100">
+                      {log.gymName || 'Tenant Pod'}
+                      <div className="text-[10px] text-neutral-500 font-mono mt-0.5 truncate max-w-[200px]">
+                        {log.gymId}
+                      </div>
+                    </td>
+                    <td className="py-3.5 px-4">
+                      <span className="font-mono text-xs px-2 py-0.5 rounded bg-neutral-800 text-emerald-400 border border-neutral-700">
+                        {log.action}
+                      </span>
+                    </td>
+                    <td className="py-3.5 px-4 text-neutral-300">
+                      <div className="font-medium text-neutral-200">{log.entityType}</div>
+                      <div className="text-[10px] text-neutral-500 font-mono mt-0.5 truncate max-w-[150px]">
+                        {log.entityId}
+                      </div>
+                    </td>
+                    <td className="py-3.5 px-4">
+                      <span className="text-[11px] px-2 py-0.5 rounded-full bg-neutral-800 text-neutral-300 border border-neutral-700">
+                        {log.actorType}
+                      </span>
+                    </td>
+                    <td className="py-3.5 px-4 text-neutral-400 font-mono text-[11px]">
+                      {log.createdAt ? new Date(log.createdAt).toLocaleString() : '—'}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    )}
       </main>
 
       {/* CREATE TENANT MODAL */}

@@ -325,6 +325,24 @@ const ROUTE_REGISTRY: RouteDeclaration[] = [
     hasBodyIsolationTest: false,
     hasResourceIdIsolationTest: false,
     notes: 'List gym notifications'
+  },
+  {
+    method: 'GET',
+    url: '/api/gyms/platform/metrics',
+    isTenantScoped: false,
+    hasPathIsolationTest: false,
+    hasBodyIsolationTest: false,
+    hasResourceIdIsolationTest: false,
+    notes: 'Platform super admin system metrics'
+  },
+  {
+    method: 'GET',
+    url: '/api/gyms/:gymId/audit-logs',
+    isTenantScoped: true,
+    hasPathIsolationTest: true,
+    hasBodyIsolationTest: false,
+    hasResourceIdIsolationTest: false,
+    notes: 'List gym audit logs'
   }
 ];
 
@@ -855,6 +873,14 @@ describe('Route Registry & Cross-Tenant Isolation Enforcement', () => {
       headers: { authorization: `Bearer ${ownerBToken}` }
     });
     expect(gymNotifsPathRes.statusCode).toBe(403);
+
+    // 32. GET /api/gyms/:gymId/audit-logs
+    const auditLogsPathRes = await app.inject({
+      method: 'GET',
+      url: `/api/gyms/${gymAId}/audit-logs`,
+      headers: { authorization: `Bearer ${ownerBToken}` }
+    });
+    expect(auditLogsPathRes.statusCode).toBe(403);
   });
 
   // Verification of Body Isolation (Payload injection with foreign gym ID)

@@ -6,6 +6,7 @@ import { PaymentRecordSchema, RefundRecordSchema, AttendanceCheckInSchema, Atten
 import { authenticateUser, createRequireTenantMembership } from '../middleware/auth.js';
 import { generateRandomToken, hashToken, hashPassword } from '../auth/crypto.js';
 import { sendEmail, renderEmailTemplate, generateWhatsAppLink } from '../notifications/index.js';
+import { insertAuditLog } from '../audit/index.js';
 
 interface GymRoutesOptions {
   pool: pg.Pool;
@@ -213,6 +214,64 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
     }
   });
 
+  // 1c. Platform Super Admin System Metrics
+  fastify.get('/platform/metrics', { preHandler: [authenticateUser] }, async (req, reply) => {
+    const user = req.user!;
+    if (!user.isPlatformAdmin) {
+      return reply.status(403).send({ error: 'Forbidden: Platform Super Admin privilege required' });
+    }
+
+    const client = await pool.connect();
+    try {
+      const tenantsRes = await client.query<{ count: number }>('SELECT count(*)::int as count FROM tenants;');
+      const membersRes = await client.query<{ count: number }>('SELECT count(*)::int as count FROM members WHERE deleted_at IS NULL;');
+      const revenueRes = await client.query<{ total: string }>(
+        "SELECT COALESCE(SUM(amount_cents), 0)::text as total FROM payment_transactions WHERE type = 'payment';"
+      );
+      const checkInsRes = await client.query<{ count: number }>(
+        'SELECT count(*)::int as count FROM attendance_logs WHERE attendance_date = CURRENT_DATE AND is_voided = false;'
+      );
+      const recentRes = await client.query<{
+        id: string;
+        gym_id: string;
+        gym_name: string | null;
+        actor_type: string;
+        action: string;
+        entity_type: string;
+        entity_id: string;
+        created_at: string;
+      }>(
+        `SELECT a.id, a.gym_id, t.name as gym_name, a.actor_type, a.action, a.entity_type, a.entity_id, a.created_at
+         FROM audit_logs a
+         LEFT JOIN tenants t ON t.id = a.gym_id
+         ORDER BY a.created_at DESC
+         LIMIT 25;`
+      );
+
+      const metrics = {
+        totalTenants: Number(tenantsRes.rows[0]?.count || 0),
+        totalMembers: Number(membersRes.rows[0]?.count || 0),
+        totalRevenueCents: Number(revenueRes.rows[0]?.total || 0),
+        totalCheckInsToday: Number(checkInsRes.rows[0]?.count || 0)
+      };
+
+      const recentActivity = recentRes.rows.map((r) => ({
+        id: r.id,
+        gymId: r.gym_id,
+        gymName: r.gym_name || 'Tenant Pod',
+        action: r.action,
+        entityType: r.entity_type,
+        entityId: r.entity_id,
+        actorType: r.actor_type,
+        createdAt: r.created_at
+      }));
+
+      return reply.send({ metrics, recentActivity });
+    } finally {
+      client.release();
+    }
+  });
+
   // 2. List members in gym (with search query, status filter, and pagination)
   fastify.get<{
     Params: { gymId: string };
@@ -351,6 +410,17 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
           emergencyContactPhone: emergencyContactPhone?.trim() ? emergencyContactPhone.trim() : null,
           status: 'active'
         }).returning();
+
+        // Append-only, PII-free audit log
+        await insertAuditLog(client, {
+          gymId,
+          userId,
+          action: 'member.created',
+          entityType: 'member',
+          entityId: rows[0].id,
+          changedFields: ['memberNumber', 'gender'],
+          metadata: { memberNumber: rows[0].memberNumber }
+        });
 
         return rows[0];
       });
@@ -500,6 +570,18 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
           .set(updateData)
           .where(and(eq(members.gymId, gymId), eq(members.id, memberId)))
           .returning();
+
+        if (rows[0]) {
+          await insertAuditLog(client, {
+            gymId,
+            userId,
+            action: 'member.updated',
+            entityType: 'member',
+            entityId: memberId,
+            changedFields: Object.keys(updateData).filter((k) => k !== 'updatedAt'),
+            metadata: { memberNumber: rows[0].memberNumber }
+          });
+        }
 
         return rows[0] || null;
       });
@@ -1154,12 +1236,25 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
       return reply.status(403).send({ error: 'Forbidden: Only owners and managers can cancel subscriptions' });
     }
 
-    const cancelledSub = await withTenantContext(pool, tenantContext, async (tx) => {
+    const cancelledSub = await withTenantContext(pool, tenantContext, async (tx, client) => {
       const [updated] = await tx
         .update(subscriptions)
         .set({ status: 'cancelled' })
         .where(and(eq(subscriptions.gymId, gymId), eq(subscriptions.id, subscriptionId)))
         .returning();
+
+      if (updated) {
+        await insertAuditLog(client, {
+          gymId,
+          userId: tenantContext.userId,
+          action: 'subscription.cancelled',
+          entityType: 'subscription',
+          entityId: subscriptionId,
+          changedFields: ['status'],
+          metadata: { memberId: updated.memberId }
+        });
+      }
+
       return updated || null;
     });
 
@@ -1277,7 +1372,7 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
     } = parseResult.data;
 
     try {
-      const payment = await withTenantContext(pool, tenantContext, async (tx) => {
+      const payment = await withTenantContext(pool, tenantContext, async (tx, txClient) => {
         // 1. Idempotency replay check
         const [existing] = await tx
           .select()
@@ -1359,6 +1454,17 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
             recordedByUserId: tenantContext.userId
           })
           .returning();
+
+        // Append-only, PII-free audit log
+        await insertAuditLog(txClient, {
+          gymId,
+          userId: tenantContext.userId,
+          action: 'payment.recorded',
+          entityType: 'payment',
+          entityId: inserted.id,
+          changedFields: ['amountCents', 'method', 'receiptNumber'],
+          metadata: { receiptNumber: inserted.receiptNumber, amountCents }
+        });
 
         return { isReplay: false, transaction: inserted };
       });
@@ -1451,7 +1557,7 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
     const { idempotencyKey, amountCents, method, cancelSubscription, notes } = parseResult.data;
 
     try {
-      const refundResult = await withTenantContext(pool, tenantContext, async (tx) => {
+      const refundResult = await withTenantContext(pool, tenantContext, async (tx, txClient) => {
         // Idempotency check
         const [existing] = await tx
           .select()
@@ -1519,6 +1625,17 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
             recordedByUserId: tenantContext.userId
           })
           .returning();
+
+        // Append-only, PII-free audit log
+        await insertAuditLog(txClient, {
+          gymId,
+          userId: tenantContext.userId,
+          action: 'payment.refunded',
+          entityType: 'payment',
+          entityId: insertedRefund.id,
+          changedFields: ['amountCents', 'parentTransactionId'],
+          metadata: { receiptNumber: refundReceiptNumber, amountCents: -Math.abs(amountCents) }
+        });
 
         return { isReplay: false, transaction: insertedRefund };
       });
@@ -1653,7 +1770,7 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
     const { memberId, method, wasOverride, overrideReason } = parseResult.data;
 
     try {
-      const result = await withTenantContext(pool, tenantContext, async (tx) => {
+      const result = await withTenantContext(pool, tenantContext, async (tx, txClient) => {
         // 1. Verify member exists in this gym
         const [member] = await tx
           .select({ id: members.id, status: members.status })
@@ -1697,6 +1814,16 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
             isVoided: false
           })
           .returning();
+
+        // Append-only, PII-free audit log
+        await insertAuditLog(txClient, {
+          gymId,
+          userId: tenantContext.userId,
+          action: 'attendance.checked_in',
+          entityType: 'attendance',
+          entityId: inserted.id,
+          metadata: { memberId, method: inserted.method, wasOverride: inserted.wasOverride }
+        });
 
         return inserted;
       });
@@ -1744,10 +1871,21 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
     const { voidReason } = parseResult.data;
 
     try {
-      await withTenantContext(pool, tenantContext, async (tx) => {
+      await withTenantContext(pool, tenantContext, async (tx, txClient) => {
         await tx.execute(
           sql`SELECT void_attendance_record(${gymId}::uuid, ${attendanceId}::uuid, ${voidReason}::text);`
         );
+
+        // Append-only, PII-free audit log
+        await insertAuditLog(txClient, {
+          gymId,
+          userId: tenantContext.userId,
+          action: 'attendance.voided',
+          entityType: 'attendance',
+          entityId: attendanceId,
+          changedFields: ['isVoided', 'voidReason'],
+          metadata: { voidReason }
+        });
       });
 
       return reply.send({ success: true, message: 'Attendance record voided successfully' });
@@ -1983,6 +2121,16 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
         joinedDate: m.joined_date
       } : null;
 
+      // Append-only, PII-free audit log
+      await insertAuditLog(client, {
+        gymId,
+        userId: tenantContext.userId,
+        action: 'registration_request.approved',
+        entityType: 'registration_request',
+        entityId: requestId,
+        metadata: { memberId }
+      });
+
       await client.query('COMMIT');
 
       return reply.send({
@@ -2036,6 +2184,16 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
         'SELECT reject_member_registration_request($1, $2, $3, $4);',
         [gymId, requestId, tenantContext.userId, parseRes.data.reason || null]
       );
+
+      // Append-only, PII-free audit log
+      await insertAuditLog(client, {
+        gymId,
+        userId: tenantContext.userId,
+        action: 'registration_request.rejected',
+        entityType: 'registration_request',
+        entityId: requestId,
+        metadata: { reason: parseRes.data.reason || null }
+      });
 
       await client.query('COMMIT');
 
@@ -2528,5 +2686,82 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
     });
 
     return reply.send({ notifications: notifs });
+  });
+
+  // 24. List gym audit logs (Owner, Manager, Superadmin only)
+  fastify.get<{
+    Params: { gymId: string };
+    Querystring: { entityType?: string; action?: string; limit?: string; offset?: string };
+  }>('/:gymId/audit-logs', {
+    preHandler: [authenticateUser, requireTenant]
+  }, async (req, reply) => {
+    const { gymId, userId, role } = req.tenantContext!;
+    if (role !== 'owner' && role !== 'manager' && !req.user?.isPlatformAdmin) {
+      return reply.status(403).send({ error: 'Forbidden: Only owners and managers can view audit logs' });
+    }
+
+    const { entityType, action, limit: rawLimit, offset: rawOffset } = req.query;
+    const limit = Math.min(Math.max(parseInt(rawLimit || '50', 10) || 50, 1), 100);
+    const offset = Math.max(parseInt(rawOffset || '0', 10) || 0, 0);
+
+    const result = await withTenantContext(pool, { gymId, userId }, async (tx, client) => {
+      const conditions = ['gym_id = $1'];
+      const values: unknown[] = [gymId];
+
+      if (entityType) {
+        values.push(entityType);
+        conditions.push(`entity_type = $${values.length}`);
+      }
+      if (action) {
+        values.push(action);
+        conditions.push(`action = $${values.length}`);
+      }
+
+      const whereClause = conditions.join(' AND ');
+      const countRes = await client.query<{ count: number }>(
+        `SELECT count(*)::int as count FROM audit_logs WHERE ${whereClause};`,
+        values
+      );
+      const total = Number(countRes.rows[0]?.count || 0);
+
+      values.push(limit);
+      values.push(offset);
+      const rowsRes = await client.query<{
+        id: string;
+        gym_id: string;
+        user_id: string | null;
+        actor_type: string;
+        action: string;
+        entity_type: string;
+        entity_id: string;
+        changed_fields: string[] | null;
+        metadata: Record<string, unknown> | null;
+        created_at: string;
+      }>(
+        `SELECT id, gym_id, user_id, actor_type, action, entity_type, entity_id, changed_fields, metadata, created_at
+         FROM audit_logs
+         WHERE ${whereClause}
+         ORDER BY created_at DESC
+         LIMIT $${values.length - 1} OFFSET $${values.length};`,
+        values
+      );
+
+      const logs = rowsRes.rows.map((r) => ({
+        id: r.id,
+        gymId: r.gym_id,
+        userId: r.user_id,
+        actorType: r.actor_type,
+        action: r.action,
+        entityType: r.entity_type,
+        entityId: r.entity_id,
+        changedFields: r.changed_fields || [],
+        metadata: r.metadata || {},
+        createdAt: r.created_at
+      }));
+
+      return { logs, total };
+    });
+
+    return reply.send({ logs: result.logs, total: result.total, limit, offset });
   });
 };

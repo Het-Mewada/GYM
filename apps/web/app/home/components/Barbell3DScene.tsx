@@ -55,14 +55,14 @@ function ChalkDustParticles({ count = 250 }: { count?: number }) {
 
 // ============================================================================
 // ULTRA-REALISTIC 3D HUMAN LIFTER
-// Posed exactly matching the reference powerlifter deadlift:
-// Torso hinged forward, arms hanging straight down in front holding the bar,
-// and slowly standing straight with the barbell as the user scrolls.
+// - 5 anatomically curled fingers forming a tight power grip overhand fist
+// - Barbell strictly 20cm in FRONT of body/tshirt (never penetrates clothing)
+// - Crouch-to-stand deadlift execution synchronized with 360-degree scene orbit
 // ============================================================================
 function UltraRealistic3DLifter({ explodeProgress }: { explodeProgress: number }) {
   const { scene } = useGLTF('/assets/home/human-lifter.glb');
 
-  // Clone with SkeletonUtils so every canvas has its own independent mesh & bones
+  // Clone with SkeletonUtils so each canvas has independent mesh & bones
   const clonedScene = useMemo(() => {
     if (!scene) return null;
     return SkeletonUtils.clone(scene);
@@ -70,14 +70,18 @@ function UltraRealistic3DLifter({ explodeProgress }: { explodeProgress: number }
 
   const lifterGroupRef = useRef<THREE.Group>(null);
   const bonesMap = useRef<Record<string, THREE.Bone>>({});
+  const restQuatsRef = useRef<Record<string, THREE.Quaternion>>({});
+  const restHipsYRef = useRef<number>(-1.416);
 
   useEffect(() => {
     if (!clonedScene) return;
-    const map: Record<string, THREE.Bone> = {};
+    const bones: Record<string, THREE.Bone> = {};
+    const quats: Record<string, THREE.Quaternion> = {};
+
     clonedScene.traverse((obj) => {
       if ((obj as THREE.Bone).isBone) {
-        map[obj.name] = obj as THREE.Bone;
-        map[obj.name.replace(':', '')] = obj as THREE.Bone;
+        bones[obj.name] = obj as THREE.Bone;
+        quats[obj.name] = obj.quaternion.clone();
       }
       if ((obj as THREE.Mesh).isMesh) {
         obj.castShadow = true;
@@ -89,74 +93,127 @@ function UltraRealistic3DLifter({ explodeProgress }: { explodeProgress: number }
         }
       }
     });
-    bonesMap.current = map;
+
+    if (bones['mixamorigHips']) {
+      restHipsYRef.current = bones['mixamorigHips'].position.y;
+    }
+
+    bonesMap.current = bones;
+    restQuatsRef.current = quats;
   }, [clonedScene]);
 
-  // Dynamic deadlift execution:
-  // Starts in reference hinge posture (Image 2) and slowly stands straight with the barbell on scroll
   useFrame(() => {
     if (!lifterGroupRef.current) return;
     const bones = bonesMap.current;
+    const restQuats = restQuatsRef.current;
+    const hips = bones['mixamorigHips'];
+    if (!hips || !restQuats['mixamorigHips']) return;
 
-    const lArm = bones['mixamorigLeftArm'];
-    const rArm = bones['mixamorigRightArm'];
-    const lForeArm = bones['mixamorigLeftForeArm'];
-    const rForeArm = bones['mixamorigRightForeArm'];
-    const lHand = bones['mixamorigLeftHand'];
-    const rHand = bones['mixamorigRightHand'];
-    const spine = bones['mixamorigSpine'];
-    const spine1 = bones['mixamorigSpine1'];
+    // Stand progress: 0 (deep crouch setup) -> 1 (full vertical standing lockout)
+    const standProgress = Math.max(0, Math.min(1, explodeProgress));
+    const crouch = 1.0 - standProgress;
+
+    // Athlete scale
+    const athleteScale = 0.90;
+    lifterGroupRef.current.scale.set(athleteScale, athleteScale, athleteScale);
+
     const lUpLeg = bones['mixamorigLeftUpLeg'];
     const rUpLeg = bones['mixamorigRightUpLeg'];
     const lLeg = bones['mixamorigLeftLeg'];
     const rLeg = bones['mixamorigRightLeg'];
+    const lFoot = bones['mixamorigLeftFoot'];
+    const rFoot = bones['mixamorigRightFoot'];
+    const spine = bones['mixamorigSpine'];
+    const spine1 = bones['mixamorigSpine1'];
     const head = bones['mixamorigHead'];
+    const lArm = bones['mixamorigLeftArm'];
+    const rArm = bones['mixamorigRightArm'];
+    const lHand = bones['mixamorigLeftHand'];
+    const rHand = bones['mixamorigRightHand'];
 
-    // Large, heroic powerlifter scale
-    const athleteScale = 0.95;
-    lifterGroupRef.current.scale.set(athleteScale, athleteScale, athleteScale);
+    // 1. Hips drop down in crouch
+    hips.position.y = restHipsYRef.current - 12 * crouch;
 
-    // Stand progress smoothly transitions 0 (deep setup hinge) -> 1 (full vertical lockout)
-    const standProgress = Math.max(0, Math.min(1, explodeProgress));
-    const hinge = 1.0 - standProgress;
+    // 2. Thighs / Hips hinge: (+X)
+    const hipAngle = 0.28 * crouch;
+    const qHip = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), hipAngle);
+    if (lUpLeg && restQuats['mixamorigLeftUpLeg']) lUpLeg.quaternion.copy(restQuats['mixamorigLeftUpLeg']).multiply(qHip);
+    if (rUpLeg && restQuats['mixamorigRightUpLeg']) rUpLeg.quaternion.copy(restQuats['mixamorigRightUpLeg']).multiply(qHip);
 
-    // 1. Torso & Spine: flat back hinge (matching reference image), straightening to vertical
-    if (spine) spine.rotation.x = -0.38 * hinge;
-    if (spine1) spine1.rotation.x = -0.16 * hinge;
+    // 3. Knees: moderate athletic bend (-X) keeping shins vertical
+    const kneeAngle = -0.38 * crouch;
+    const qKnee = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), kneeAngle);
+    if (lLeg && restQuats['mixamorigLeftLeg']) lLeg.quaternion.copy(restQuats['mixamorigLeftLeg']).multiply(qKnee);
+    if (rLeg && restQuats['mixamorigRightLeg']) rLeg.quaternion.copy(restQuats['mixamorigRightLeg']).multiply(qKnee);
 
-    // 2. Legs: knees bent and hips back in setup, extending to straight lockout
-    if (lUpLeg && rUpLeg) {
-      lUpLeg.rotation.x = -0.42 * hinge;
-      rUpLeg.rotation.x = -0.42 * hinge;
-    }
-    if (lLeg && rLeg) {
-      lLeg.rotation.x = 0.42 * hinge;
-      rLeg.rotation.x = 0.42 * hinge;
-    }
+    // 4. Ankles: keep feet planted flat
+    if (lFoot && restQuats['mixamorigLeftFoot']) lFoot.quaternion.copy(restQuats['mixamorigLeftFoot']);
+    if (rFoot && restQuats['mixamorigRightFoot']) rFoot.quaternion.copy(restQuats['mixamorigRightFoot']);
 
-    // 3. Head: focused forward along floor at start, leveling out at lockout
-    if (head) {
-      head.rotation.x = -0.18 * hinge;
-    }
-
-    // 4. Arms: hanging straight down in front of torso holding the bar (matching reference photo)
-    if (lArm && rArm) {
-      lArm.rotation.set(1.42 - standProgress * 0.25, 0.85, 0.38 + standProgress * 0.1);
-      rArm.rotation.set(1.42 - standProgress * 0.25, -0.85, -0.38 - standProgress * 0.1);
-    }
-    if (lForeArm && rForeArm) {
-      lForeArm.rotation.set(0.08, 0, 0.12);
-      rForeArm.rotation.set(0.08, 0, -0.12);
-    }
-    if (lHand && rHand) {
-      // Overhand hook grip securely locked onto the knurled barbell
-      lHand.rotation.set(0.35, 0, 0);
-      rHand.rotation.set(0.35, 0, 0);
+    // 5. Spine: flat back forward hinge (+X)
+    const spineAngle = 0.72 * crouch;
+    const qSpine = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), spineAngle);
+    if (spine && restQuats['mixamorigSpine']) spine.quaternion.copy(restQuats['mixamorigSpine']).multiply(qSpine);
+    if (spine1 && restQuats['mixamorigSpine1']) {
+      const qSpine1 = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), 0.22 * crouch);
+      spine1.quaternion.copy(restQuats['mixamorigSpine1']).multiply(qSpine1);
     }
 
-    // 5. Position: Hands stay locked to the barbell in front, rising smoothly together
-    const barElevation = -0.25 + standProgress * 0.55;
-    lifterGroupRef.current.position.set(0, -2.12 + barElevation, -0.32);
+    // 6. Head: focused forward along the lifting line
+    if (head && restQuats['mixamorigHead']) {
+      const qHead = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -0.65 * crouch);
+      head.quaternion.copy(restQuats['mixamorigHead']).multiply(qHead);
+    }
+
+    // 7. Arms: reach forward in front of body/tshirt to hold the barbell
+    const armX = 1.30 - crouch * 0.12;
+    const armZL = 0.35 + crouch * 0.45;
+    const armZR = -0.35 - crouch * 0.45;
+    const qArmL = new THREE.Quaternion().setFromEuler(new THREE.Euler(armX, 0, armZL, 'XYZ'));
+    const qArmR = new THREE.Quaternion().setFromEuler(new THREE.Euler(armX, 0, armZR, 'XYZ'));
+    if (lArm && restQuats['mixamorigLeftArm']) lArm.quaternion.copy(restQuats['mixamorigLeftArm']).multiply(qArmL);
+    if (rArm && restQuats['mixamorigRightArm']) rArm.quaternion.copy(restQuats['mixamorigRightArm']).multiply(qArmR);
+
+    // 8. Wrist orientation: overhand knuckles forward/up
+    const qHandL = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.25, 0.1, -0.15, 'XYZ'));
+    const qHandR = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.25, -0.1, 0.15, 'XYZ'));
+    if (lHand && restQuats['mixamorigLeftHand']) lHand.quaternion.copy(restQuats['mixamorigLeftHand']).multiply(qHandL);
+    if (rHand && restQuats['mixamorigRightHand']) rHand.quaternion.copy(restQuats['mixamorigRightHand']).multiply(qHandR);
+
+    // 9. REALISTIC 5-FINGER POWER FISTS:
+    // Rotate joints around X to curl fingers firmly down and around the barbell shaft
+    const fingers = ['Index', 'Middle', 'Ring', 'Pinky'];
+    ['Left', 'Right'].forEach((side) => {
+      fingers.forEach((finger) => {
+        const b1 = bones[`mixamorig${side}Hand${finger}1`];
+        const b2 = bones[`mixamorig${side}Hand${finger}2`];
+        const b3 = bones[`mixamorig${side}Hand${finger}3`];
+        if (b1) b1.rotation.set(1.30, 0, 0);
+        if (b2) b2.rotation.set(1.45, 0, 0);
+        if (b3) b3.rotation.set(1.25, 0, 0);
+      });
+      // Thumb wraps securely underneath the barbell
+      const t1 = bones[`mixamorig${side}HandThumb1`];
+      const t2 = bones[`mixamorig${side}HandThumb2`];
+      const t3 = bones[`mixamorig${side}HandThumb3`];
+      const sign = side === 'Left' ? 1 : -1;
+      if (t1) t1.rotation.set(0.65, 0, -sign * 0.45);
+      if (t2) t2.rotation.set(0.55, 0, -sign * 0.35);
+      if (t3) t3.rotation.set(0.45, 0, -sign * 0.25);
+    });
+
+    // 10. Plant feet firmly on the floor at floorY = -1.90
+    lifterGroupRef.current.position.set(0, 0, 0);
+    lifterGroupRef.current.rotation.set(0, 0, 0);
+    lifterGroupRef.current.updateMatrixWorld(true);
+
+    if (lFoot) {
+      const lFootPos = new THREE.Vector3();
+      lFoot.getWorldPosition(lFootPos);
+      const floorY = -1.90;
+      const offsetY = floorY - lFootPos.y;
+      lifterGroupRef.current.position.set(0, offsetY, 0);
+    }
   });
 
   if (!clonedScene) return null;
@@ -168,7 +225,9 @@ function UltraRealistic3DLifter({ explodeProgress }: { explodeProgress: number }
   );
 }
 
-// Photorealistic Theme-Coherent Olympic Barbell Model
+// ============================================================================
+// PHOTOREALISTIC THEME-COHERENT OLYMPIC BARBELL MODEL
+// ============================================================================
 function RealisticBarbellModel({ explodeProgress, liftProgress, mode }: BarbellSceneProps) {
   const groupRef = useRef<THREE.Group>(null);
   const leftSleeveGroup = useRef<THREE.Group>(null);
@@ -192,9 +251,7 @@ function RealisticBarbellModel({ explodeProgress, liftProgress, mode }: BarbellS
   const rightCapGroup = useRef<THREE.Group>(null);
   const shaftMesh = useRef<THREE.Mesh>(null);
 
-  // =========================================================================
-  // MATERIALS MATCHING GYMOS UI THEME (#0A0A0B, #111114, #C6FF3D, #F4F1EA)
-  // =========================================================================
+  // Materials matching GymOS UI theme
   const brushedSteel = useMemo(() => {
     return new THREE.MeshStandardMaterial({
       color: 0xdddddf,
@@ -221,7 +278,7 @@ function RealisticBarbellModel({ explodeProgress, liftProgress, mode }: BarbellS
     });
   }, []);
 
-  // 1. Stealth Carbon Urethane Black 25KG (Deep matte black with subtle specular)
+  // 1. Stealth Carbon Urethane Black 25KG
   const plateStealthCarbon = useMemo(() => {
     return new THREE.MeshStandardMaterial({
       color: 0x141418,
@@ -232,7 +289,7 @@ function RealisticBarbellModel({ explodeProgress, liftProgress, mode }: BarbellS
     });
   }, []);
 
-  // 2. Machined Gunmetal Titanium 20KG (High-grade brushed titanium)
+  // 2. Machined Gunmetal Titanium 20KG
   const plateGunmetalTitanium = useMemo(() => {
     return new THREE.MeshStandardMaterial({
       color: 0x2b2c34,
@@ -242,7 +299,7 @@ function RealisticBarbellModel({ explodeProgress, liftProgress, mode }: BarbellS
     });
   }, []);
 
-  // 3. Dense Matte Charcoal Slate 15KG (Heavy density textured charcoal)
+  // 3. Dense Matte Charcoal Slate 15KG
   const plateMatteSlate = useMemo(() => {
     return new THREE.MeshStandardMaterial({
       color: 0x1e1f26,
@@ -251,7 +308,7 @@ function RealisticBarbellModel({ explodeProgress, liftProgress, mode }: BarbellS
     });
   }, []);
 
-  // 4. Signature GymOS Volt Green Performance Plate 10KG (Electric volt accent)
+  // 4. Signature GymOS Volt Green Performance Plate 10KG
   const plateSignatureVolt = useMemo(() => {
     return new THREE.MeshStandardMaterial({
       color: 0xc6ff3d,
@@ -272,7 +329,7 @@ function RealisticBarbellModel({ explodeProgress, liftProgress, mode }: BarbellS
     });
   }, []);
 
-  // Anodized Volt Accent Material (Grip bands, collar locks, rim grooves)
+  // Anodized Volt Accent Material
   const anodizedVolt = useMemo(() => {
     return new THREE.MeshStandardMaterial({
       color: 0xc6ff3d,
@@ -286,65 +343,63 @@ function RealisticBarbellModel({ explodeProgress, liftProgress, mode }: BarbellS
   useFrame((state) => {
     if (!groupRef.current) return;
     const t = state.clock.getElapsedTime();
-    const pointer = state.pointer; // Mouse parallax [-1, 1]
 
     if (mode === 'exploded') {
       const p = explodeProgress;
-      // Harmonic curve: 0 (assembled) -> 1 (peak disassembly) -> 0 (reassembled)
+      const crouch = 1.0 - p;
       const explodeFactor = Math.sin(p * Math.PI);
 
-      // Continuous 3D rotation + interactive subtle mouse parallax
-      groupRef.current.rotation.y = p * Math.PI * 2.2 + t * 0.22 + pointer.x * 0.25;
-      groupRef.current.rotation.x = 0.1 + Math.sin(p * Math.PI) * 0.2 - pointer.y * 0.2;
-      groupRef.current.rotation.z = Math.sin(t * 0.3) * 0.02;
+      // Barbell position strictly matches the lifter's fists 20cm IN FRONT of tshirt:
+      // At crouch (p = 0): y = -0.68, z = +0.27 (well in front of shins & knees)
+      // At lockout (p = 1): y = -0.41, z = +0.25 (well in front of tshirt & thighs)
+      const barY = -0.41 - crouch * 0.27;
+      const barZ = 0.25 + crouch * 0.02;
+      groupRef.current.position.set(0, barY, barZ);
+      groupRef.current.rotation.set(0, 0, Math.sin(t * 0.5) * 0.01);
 
-      // Smooth lifting elevation as the lifter stands straight
-      const barElevation = -0.25 + p * 0.55;
-      groupRef.current.position.y = Math.sin(t * 0.6) * 0.02 + barElevation;
+      // Plate separation along sleeves
+      // 1. Stealth Carbon 25KG Plates (Separate factor 0.75)
+      if (lPlate1.current) lPlate1.current.position.x = -1.25 - explodeFactor * 0.75;
+      if (rPlate1.current) rPlate1.current.position.x = 1.25 + explodeFactor * 0.75;
 
-      // 1. Stealth Carbon 25KG Plates (Separate factor 0.7)
-      if (lPlate1.current) lPlate1.current.position.x = -1.25 - explodeFactor * 0.7;
-      if (rPlate1.current) rPlate1.current.position.x = 1.25 + explodeFactor * 0.7;
+      // 2. Gunmetal Titanium 20KG Plates (Separate factor 1.35)
+      if (lPlate2.current) lPlate2.current.position.x = -1.37 - explodeFactor * 1.35;
+      if (rPlate2.current) rPlate2.current.position.x = 1.37 + explodeFactor * 1.35;
 
-      // 2. Gunmetal Titanium 20KG Plates (Separate factor 1.3)
-      if (lPlate2.current) lPlate2.current.position.x = -1.37 - explodeFactor * 1.3;
-      if (rPlate2.current) rPlate2.current.position.x = 1.37 + explodeFactor * 1.3;
+      // 3. Matte Slate 15KG Plates (Separate factor 1.95)
+      if (lPlate3.current) lPlate3.current.position.x = -1.48 - explodeFactor * 1.95;
+      if (rPlate3.current) rPlate3.current.position.x = 1.48 + explodeFactor * 1.95;
 
-      // 3. Matte Slate 15KG Plates (Separate factor 1.9)
-      if (lPlate3.current) lPlate3.current.position.x = -1.48 - explodeFactor * 1.9;
-      if (rPlate3.current) rPlate3.current.position.x = 1.48 + explodeFactor * 1.9;
+      // 4. GymOS Signature Volt 10KG Plates (Separate factor 2.55)
+      if (lPlate4.current) lPlate4.current.position.x = -1.58 - explodeFactor * 2.55;
+      if (rPlate4.current) rPlate4.current.position.x = 1.58 + explodeFactor * 2.55;
 
-      // 4. GymOS Signature Volt 10KG Plates (Separate factor 2.5)
-      if (lPlate4.current) lPlate4.current.position.x = -1.58 - explodeFactor * 2.5;
-      if (rPlate4.current) rPlate4.current.position.x = 1.58 + explodeFactor * 2.5;
+      // 5. Polished Chrome 5KG Change Plates (Separate factor 3.15)
+      if (lPlate5.current) lPlate5.current.position.x = -1.67 - explodeFactor * 3.15;
+      if (rPlate5.current) rPlate5.current.position.x = 1.67 + explodeFactor * 3.15;
 
-      // 5. Polished Chrome 5KG Change Plates (Separate factor 3.1)
-      if (lPlate5.current) lPlate5.current.position.x = -1.67 - explodeFactor * 3.1;
-      if (rPlate5.current) rPlate5.current.position.x = 1.67 + explodeFactor * 3.1;
-
-      // 6. Lock Collars (Fly outward far with rotation)
+      // 6. Lock Collars
       if (leftCollarGroup.current) {
-        leftCollarGroup.current.position.x = -1.78 - explodeFactor * 3.8;
+        leftCollarGroup.current.position.x = -1.78 - explodeFactor * 3.85;
         leftCollarGroup.current.rotation.z = explodeFactor * 0.6;
       }
       if (rightCollarGroup.current) {
-        rightCollarGroup.current.position.x = 1.78 + explodeFactor * 3.8;
+        rightCollarGroup.current.position.x = 1.78 + explodeFactor * 3.85;
         rightCollarGroup.current.rotation.z = -explodeFactor * 0.6;
       }
 
-      // 7. End Caps (Fly outward most)
+      // 7. End Caps
       if (leftCapGroup.current) {
-        leftCapGroup.current.position.x = -2.15 - explodeFactor * 4.4;
+        leftCapGroup.current.position.x = -2.15 - explodeFactor * 4.5;
       }
       if (rightCapGroup.current) {
-        rightCapGroup.current.position.x = 2.15 + explodeFactor * 4.4;
+        rightCapGroup.current.position.x = 2.15 + explodeFactor * 4.5;
       }
     } else if (mode === 'lift') {
       const lp = liftProgress;
       const currentY = -1.6 + lp * 2.0;
-      groupRef.current.position.y = currentY;
-      groupRef.current.rotation.y = 0;
-      groupRef.current.rotation.x = 0;
+      groupRef.current.position.set(0, currentY, 0);
+      groupRef.current.rotation.set(0, 0, 0);
 
       const flex = Math.sin(lp * Math.PI) * 0.08;
       if (shaftMesh.current) {
@@ -371,43 +426,28 @@ function RealisticBarbellModel({ explodeProgress, liftProgress, mode }: BarbellS
 
   return (
     <group ref={groupRef}>
-      {/* ===================================================================
-          1. REALISTIC 3D HUMAN LIFTER
-          Only rendered in 'exploded' Platform Architecture mode.
-          In 'lift' (Precision Telemetry) mode, only the barbell lifts.
-         =================================================================== */}
-      {mode === 'exploded' && (
-        <Suspense fallback={null}>
-          <UltraRealistic3DLifter explodeProgress={explodeProgress} />
-        </Suspense>
-      )}
-
-      {/* ===================================================================
-          2. OLYMPIC STEEL SHAFT
-         =================================================================== */}
+      {/* 1. OLYMPIC STEEL SHAFT */}
       <mesh ref={shaftMesh} rotation={[0, 0, Math.PI / 2]} material={brushedSteel}>
         <cylinderGeometry args={[0.042, 0.042, 4.3, 48]} />
       </mesh>
 
       {/* Textured knurling sleeves on shaft */}
-      <mesh rotation={[0, 0, Math.PI / 2]} position={[-0.42, 0, 0]} material={machinedDarkAlloy}>
+      <mesh rotation={[0, 0, Math.PI / 2]} position={[-0.60, 0, 0]} material={machinedDarkAlloy}>
         <cylinderGeometry args={[0.043, 0.043, 0.35, 36]} />
       </mesh>
-      <mesh rotation={[0, 0, Math.PI / 2]} position={[0.42, 0, 0]} material={machinedDarkAlloy}>
+      <mesh rotation={[0, 0, Math.PI / 2]} position={[0.60, 0, 0]} material={machinedDarkAlloy}>
         <cylinderGeometry args={[0.043, 0.043, 0.35, 36]} />
       </mesh>
 
       {/* Anodized Volt Grip Indicator Bands */}
-      <mesh rotation={[0, 0, Math.PI / 2]} position={[-0.65, 0, 0]} material={anodizedVolt}>
+      <mesh rotation={[0, 0, Math.PI / 2]} position={[-0.80, 0, 0]} material={anodizedVolt}>
         <cylinderGeometry args={[0.044, 0.044, 0.015, 32]} />
       </mesh>
-      <mesh rotation={[0, 0, Math.PI / 2]} position={[0.65, 0, 0]} material={anodizedVolt}>
+      <mesh rotation={[0, 0, Math.PI / 2]} position={[0.80, 0, 0]} material={anodizedVolt}>
         <cylinderGeometry args={[0.044, 0.044, 0.015, 32]} />
       </mesh>
 
-      {/* ===================================================================
-          3. ROTATING CHROME SLEEVES WITH INNER FLANGES
-         =================================================================== */}
+      {/* 2. ROTATING CHROME SLEEVES */}
       <group ref={leftSleeveGroup} position={[-1.15, 0, 0]}>
         <mesh rotation={[0, 0, Math.PI / 2]} position={[0.15, 0, 0]} material={sleeveChrome}>
           <cylinderGeometry args={[0.095, 0.095, 0.04, 36]} />
@@ -426,11 +466,8 @@ function RealisticBarbellModel({ explodeProgress, liftProgress, mode }: BarbellS
         </mesh>
       </group>
 
-      {/* ===================================================================
-          4. THEME-MATCHED LUXURY GYMOS PLATES
-         =================================================================== */}
-      
-      {/* PLATE 1: STEALTH CARBON URETHANE 25KG (Diameter 0.72) with Volt Outer Ring */}
+      {/* 3. THEME-MATCHED LUXURY GYMOS PLATES */}
+      {/* PLATE 1: STEALTH CARBON URETHANE 25KG */}
       <group ref={lPlate1} position={[-1.25, 0, 0]}>
         <mesh rotation={[0, 0, Math.PI / 2]} material={plateStealthCarbon}>
           <cylinderGeometry args={[0.72, 0.72, 0.11, 48]} />
@@ -454,7 +491,7 @@ function RealisticBarbellModel({ explodeProgress, liftProgress, mode }: BarbellS
         </mesh>
       </group>
 
-      {/* PLATE 2: MACHINED GUNMETAL TITANIUM 20KG (Diameter 0.65) */}
+      {/* PLATE 2: MACHINED GUNMETAL TITANIUM 20KG */}
       <group ref={lPlate2} position={[-1.37, 0, 0]}>
         <mesh rotation={[0, 0, Math.PI / 2]} material={plateGunmetalTitanium}>
           <cylinderGeometry args={[0.65, 0.65, 0.1, 48]} />
@@ -472,7 +509,7 @@ function RealisticBarbellModel({ explodeProgress, liftProgress, mode }: BarbellS
         </mesh>
       </group>
 
-      {/* PLATE 3: MATTE CHARCOAL SLATE 15KG (Diameter 0.58) with Volt Recessed Ring */}
+      {/* PLATE 3: MATTE CHARCOAL SLATE 15KG */}
       <group ref={lPlate3} position={[-1.48, 0, 0]}>
         <mesh rotation={[0, 0, Math.PI / 2]} material={plateMatteSlate}>
           <cylinderGeometry args={[0.58, 0.58, 0.08, 48]} />
@@ -496,7 +533,7 @@ function RealisticBarbellModel({ explodeProgress, liftProgress, mode }: BarbellS
         </mesh>
       </group>
 
-      {/* PLATE 4: SIGNATURE GYMOS VOLT PERFORMANCE 10KG (Diameter 0.50) */}
+      {/* PLATE 4: SIGNATURE GYMOS VOLT PERFORMANCE 10KG */}
       <group ref={lPlate4} position={[-1.58, 0, 0]}>
         <mesh rotation={[0, 0, Math.PI / 2]} material={plateSignatureVolt}>
           <cylinderGeometry args={[0.5, 0.5, 0.07, 48]} />
@@ -514,7 +551,7 @@ function RealisticBarbellModel({ explodeProgress, liftProgress, mode }: BarbellS
         </mesh>
       </group>
 
-      {/* PLATE 5: POLISHED OLYMPIC CHROME 5KG CHANGE PLATE (Diameter 0.38) */}
+      {/* PLATE 5: POLISHED OLYMPIC CHROME 5KG CHANGE PLATE */}
       <group ref={lPlate5} position={[-1.67, 0, 0]}>
         <mesh rotation={[0, 0, Math.PI / 2]} material={plateOlympicChrome}>
           <cylinderGeometry args={[0.38, 0.38, 0.05, 36]} />
@@ -526,9 +563,7 @@ function RealisticBarbellModel({ explodeProgress, liftProgress, mode }: BarbellS
         </mesh>
       </group>
 
-      {/* ===================================================================
-          5. PRECISION COMPETITION CLAMP COLLARS
-         =================================================================== */}
+      {/* 4. PRECISION COMPETITION CLAMP COLLARS */}
       <group ref={leftCollarGroup} position={[-1.78, 0, 0]}>
         <mesh rotation={[0, 0, Math.PI / 2]} material={machinedDarkAlloy}>
           <cylinderGeometry args={[0.11, 0.11, 0.075, 32]} />
@@ -547,9 +582,7 @@ function RealisticBarbellModel({ explodeProgress, liftProgress, mode }: BarbellS
         </mesh>
       </group>
 
-      {/* ===================================================================
-          6. END CAPS
-         =================================================================== */}
+      {/* 5. END CAPS */}
       <group ref={leftCapGroup} position={[-2.15, 0, 0]}>
         <mesh rotation={[0, 0, Math.PI / 2]} material={sleeveChrome}>
           <cylinderGeometry args={[0.074, 0.074, 0.02, 32]} />
@@ -571,6 +604,50 @@ function RealisticBarbellModel({ explodeProgress, liftProgress, mode }: BarbellS
   );
 }
 
+// ============================================================================
+// COORDINATED 360-DEGREE ROTATING ASSEMBLY
+// Rotates a full 360 degrees as the user scrolls through the section,
+// keeping the barbell firmly gripped in the lifter's fists in front of his body!
+// ============================================================================
+function Coordinated360Assembly({ explodeProgress, liftProgress, mode }: BarbellSceneProps) {
+  const assemblyRef = useRef<THREE.Group>(null);
+
+  useFrame((state) => {
+    if (!assemblyRef.current) return;
+    const t = state.clock.getElapsedTime();
+    const pointer = state.pointer;
+
+    if (mode === 'exploded') {
+      // Full 360-degree rotation driven by scroll (0 to 2*PI)
+      // + subtle continuous ambient drift + interactive mouse orbit
+      const scroll360 = explodeProgress * Math.PI * 2;
+      assemblyRef.current.rotation.y = scroll360 + Math.sin(t * 0.35) * 0.03 + pointer.x * 0.35;
+      assemblyRef.current.rotation.x = 0.06 - pointer.y * 0.15;
+    } else {
+      assemblyRef.current.rotation.y = 0;
+      assemblyRef.current.rotation.x = 0;
+    }
+  });
+
+  return (
+    <group ref={assemblyRef}>
+      {/* 3D Human Lifter (Only rendered in Platform Architecture) */}
+      {mode === 'exploded' && (
+        <Suspense fallback={null}>
+          <UltraRealistic3DLifter explodeProgress={explodeProgress} />
+        </Suspense>
+      )}
+
+      {/* Olympic Barbell Model */}
+      <RealisticBarbellModel
+        explodeProgress={explodeProgress}
+        liftProgress={liftProgress}
+        mode={mode}
+      />
+    </group>
+  );
+}
+
 export function Barbell3DScene({ explodeProgress, liftProgress, mode }: BarbellSceneProps) {
   return (
     <Canvas
@@ -588,13 +665,14 @@ export function Barbell3DScene({ explodeProgress, liftProgress, mode }: BarbellS
       <directionalLight position={[0, 1, 4]} intensity={2.2} color="#f4f1ea" />
       {/* Floor reflection bounce fill */}
       <directionalLight position={[0, -5, -1]} intensity={1.1} color="#71717a" />
-      {/* Back silhouette separator */}
-      <directionalLight position={[0, 2, -5]} intensity={2.4} color="#ffffff" />
+      {/* Back silhouette separator for 360 view */}
+      <directionalLight position={[0, 2, -5]} intensity={2.6} color="#ffffff" />
 
       {/* 3D Chalk Dust Particles in Volumetric Lighting */}
       <ChalkDustParticles count={300} />
 
-      <RealisticBarbellModel
+      {/* Coordinated 360 Rotating Assembly */}
+      <Coordinated360Assembly
         explodeProgress={explodeProgress}
         liftProgress={liftProgress}
         mode={mode}

@@ -1201,3 +1201,85 @@ export async function fetchGymNotifications(
 
   return res.json();
 }
+
+export interface PlatformMetrics {
+  totalTenants: number;
+  totalMembers: number;
+  totalRevenueCents: number;
+  totalCheckInsToday: number;
+}
+
+export interface PlatformActivityItem {
+  id: string;
+  gymId: string;
+  gymName: string;
+  action: string;
+  entityType: string;
+  entityId: string;
+  actorType: string;
+  createdAt: string;
+}
+
+export interface AuditLogItem {
+  id: string;
+  gymId: string;
+  userId: string | null;
+  actorType: string;
+  action: string;
+  entityType: string;
+  entityId: string;
+  changedFields: string[];
+  metadata: Record<string, unknown>;
+  createdAt: string;
+}
+
+export async function fetchPlatformMetrics(
+  token?: string
+): Promise<{ metrics: PlatformMetrics; recentActivity: PlatformActivityItem[] }> {
+  const activeToken = token || (typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined);
+  if (!activeToken) throw new Error('Authentication required');
+
+  const url = `${getApiBaseUrl()}/gyms/platform/metrics`;
+  const res = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${activeToken}`
+    }
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(errorBody.error || `Failed to fetch platform metrics: ${res.statusText}`);
+  }
+
+  return res.json();
+}
+
+export async function fetchGymAuditLogs(
+  gymId: string,
+  filters?: { entityType?: string; action?: string; limit?: number; offset?: number },
+  token?: string
+): Promise<{ logs: AuditLogItem[]; total: number }> {
+  const activeToken = token || (typeof window !== 'undefined' ? localStorage.getItem('access_token') || undefined : undefined);
+  if (!activeToken) throw new Error('Authentication required');
+
+  const params = new URLSearchParams();
+  if (filters?.entityType) params.append('entityType', filters.entityType);
+  if (filters?.action) params.append('action', filters.action);
+  if (filters?.limit) params.append('limit', String(filters.limit));
+  if (filters?.offset) params.append('offset', String(filters.offset));
+
+  const qs = params.toString() ? `?${params.toString()}` : '';
+  const url = `${getApiBaseUrl()}/gyms/${gymId}/audit-logs${qs}`;
+  const res = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${activeToken}`
+    }
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    throw new Error(errorBody.error || `Failed to fetch audit logs: ${res.statusText}`);
+  }
+
+  return res.json();
+}
