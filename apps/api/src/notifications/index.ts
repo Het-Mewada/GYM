@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import type { NotificationTemplate, NotificationChannel } from '@gym/shared';
+import type { NotificationTemplate } from '@gym/shared';
 
 export interface SendEmailPayload {
   to: string;
@@ -89,7 +89,6 @@ export function renderEmailTemplate(
   ctx: NotificationContext
 ): { subject: string; html: string } {
   const brandVolt = '#C6FF3D';
-  const brandDark = '#0A0A0A';
 
   switch (template) {
     case 'welcome_enrollment':

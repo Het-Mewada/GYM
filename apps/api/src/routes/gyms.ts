@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 import type pg from 'pg';
 import crypto from 'node:crypto';
-import { withTenantContext, members, memberRegistrationRequests, membershipPlans, subscriptions, paymentTransactions, attendanceLogs, csvImportJobs, notificationLogs, tenants, eq, and, or, ilike, isNull, desc, sql } from '@gym/db';
+import { withTenantContext, members, memberRegistrationRequests, membershipPlans, subscriptions, paymentTransactions, attendanceLogs, csvImportJobs, notificationLogs, eq, and, or, ilike, isNull, desc, sql } from '@gym/db';
 import { PaymentRecordSchema, RefundRecordSchema, AttendanceCheckInSchema, AttendanceVoidSchema, MemberRegistrationRejectSchema, SendNotificationSchema, type SendNotificationInput, parseCsv, normalizeCsvHeader, validateCsvRow, type PiiFreeCsvError } from '@gym/shared';
 import { authenticateUser, createRequireTenantMembership } from '../middleware/auth.js';
 import { generateRandomToken, hashToken, hashPassword } from '../auth/crypto.js';
@@ -2704,7 +2704,7 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
     const limit = Math.min(Math.max(parseInt(rawLimit || '50', 10) || 50, 1), 100);
     const offset = Math.max(parseInt(rawOffset || '0', 10) || 0, 0);
 
-    const result = await withTenantContext(pool, { gymId, userId }, async (tx, client) => {
+    const result = await withTenantContext(pool, { gymId, userId }, async (_tx, client) => {
       const conditions = ['gym_id = $1'];
       const values: unknown[] = [gymId];
 

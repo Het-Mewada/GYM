@@ -43,6 +43,7 @@ services:
     restart: unless-stopped
     environment:
       PORT: 3000
+      API_URL: http://api:4000
       INTERNAL_API_URL: http://api:4000
     ports:
       - "3000:3000"
