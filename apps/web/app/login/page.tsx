@@ -4,10 +4,14 @@ import React, { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { loginUser, type GymMembershipItem } from '../lib/api';
+import { PhoneInput } from '../components/PhoneInput';
 
 export default function LoginPage() {
   const router = useRouter();
-  const [identifier, setIdentifier] = useState('');
+  const [loginMethod, setLoginMethod] = useState<'phone' | 'email'>('phone');
+  const [countryCode, setCountryCode] = useState<string>('+91');
+  const [phoneDigits, setPhoneDigits] = useState<string>('');
+  const [emailValue, setEmailValue] = useState<string>('');
   const [password, setPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -33,6 +37,31 @@ export default function LoginPage() {
   const handleLogin = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setError(null);
+
+    let identifier = '';
+    if (loginMethod === 'phone') {
+      if (!phoneDigits) {
+        setError('Phone number is required');
+        return;
+      }
+      if (phoneDigits.length !== 10) {
+        setError('Phone number must be exactly 10 digits');
+        return;
+      }
+      identifier = `${countryCode}${phoneDigits}`;
+    } else {
+      if (!emailValue.trim()) {
+        setError('Email address is required');
+        return;
+      }
+      identifier = emailValue.trim();
+    }
+
+    if (!password) {
+      setError('Password is required');
+      return;
+    }
+
     setIsLoading(true);
 
     try {
@@ -98,14 +127,14 @@ export default function LoginPage() {
   return (
     <div className="min-h-screen bg-neutral-950 text-neutral-100 flex flex-col justify-center items-center p-6">
       <div className="w-full max-w-md bg-neutral-900 border border-neutral-800 rounded-2xl p-8 shadow-2xl">
-        <div className="text-center mb-6">
-          <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-emerald-500 font-extrabold text-black text-xl mb-3 shadow-lg shadow-emerald-950/60">
+        <div className="flex items-center space-x-3 mb-6">
+          <span className="flex items-center justify-center w-10 h-10 rounded-xl bg-emerald-500 font-bold text-black text-base shadow-lg shadow-emerald-500/20">
             GYM
+          </span>
+          <div>
+            <h1 className="text-xl font-bold tracking-tight text-white">GymOS</h1>
+            <p className="text-xs text-neutral-400">Staff & Admin Authentication</p>
           </div>
-          <h1 className="text-2xl font-bold text-white tracking-tight">Sign in to GymOS</h1>
-          <p className="text-xs text-neutral-400 mt-1">
-            Access your multi-tenant gym management portal
-          </p>
         </div>
 
         {error && (
@@ -114,21 +143,66 @@ export default function LoginPage() {
           </div>
         )}
 
+        {/* Method Toggle Tabs */}
+        <div className="flex rounded-lg bg-neutral-950 border border-neutral-800 p-1 mb-4 text-xs font-medium">
+          <button
+            type="button"
+            onClick={() => { setLoginMethod('phone'); setError(null); }}
+            className={`flex-1 py-1.5 rounded-md transition text-center cursor-pointer ${
+              loginMethod === 'phone'
+                ? 'bg-neutral-800 text-emerald-400 font-semibold shadow-sm'
+                : 'text-neutral-400 hover:text-white'
+            }`}
+          >
+            📱 Mobile Phone
+          </button>
+          <button
+            type="button"
+            onClick={() => { setLoginMethod('email'); setError(null); }}
+            className={`flex-1 py-1.5 rounded-md transition text-center cursor-pointer ${
+              loginMethod === 'email'
+                ? 'bg-neutral-800 text-emerald-400 font-semibold shadow-sm'
+                : 'text-neutral-400 hover:text-white'
+            }`}
+          >
+            ✉️ Email Address
+          </button>
+        </div>
+
         <form onSubmit={handleLogin} className="space-y-4">
-          <div>
-            <label htmlFor="identifier" className="block text-xs font-semibold text-neutral-300 mb-1">
-              Phone Number or Email Address
-            </label>
-            <input
-              id="identifier"
-              type="text"
-              required
-              value={identifier}
-              onChange={(e) => setIdentifier(e.target.value)}
-              placeholder="+91... or staff@gym.com"
-              className="w-full px-3 py-2 rounded-lg bg-neutral-950 border border-neutral-800 text-sm font-mono text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition"
-            />
-          </div>
+          {loginMethod === 'phone' ? (
+            <div>
+              <label htmlFor="login-phone-input" className="block text-xs font-semibold text-neutral-300 mb-1">
+                Mobile Phone <span className="text-neutral-500 font-normal">(Exact 10 digits)</span>
+              </label>
+              <PhoneInput
+                id="login-phone-input"
+                dataTestId="phone-input"
+                countryCode={countryCode}
+                value={phoneDigits ? `${countryCode}${phoneDigits}` : ''}
+                onChange={(_full, country, digits) => {
+                  setCountryCode(country);
+                  setPhoneDigits(digits);
+                }}
+                required
+              />
+            </div>
+          ) : (
+            <div>
+              <label htmlFor="email-input" className="block text-xs font-semibold text-neutral-300 mb-1">
+                Email Address
+              </label>
+              <input
+                id="email-input"
+                type="email"
+                required
+                value={emailValue}
+                onChange={(e) => setEmailValue(e.target.value)}
+                placeholder="staff@gym.com"
+                className="w-full px-3 py-2 rounded-lg bg-neutral-950 border border-neutral-800 text-sm font-mono text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition"
+              />
+            </div>
+          )}
 
           <div>
             <label htmlFor="password" className="block text-xs font-semibold text-neutral-300 mb-1">
@@ -154,66 +228,47 @@ export default function LoginPage() {
           </button>
         </form>
 
-
-
         <div className="mt-5 text-center text-xs text-neutral-500">
           <Link href="/members" className="text-emerald-400 hover:underline">
-            ← Back to Members Directory
+            ← Continue as Guest / Preview Mode
           </Link>
         </div>
       </div>
 
-      {/* SELECT GYM TENANT MODAL (Displayed when res.memberships.length > 1) */}
+      {/* Post-Login Multi-Tenant Selector Modal */}
       {showSelectTenantModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md">
-          <div className="w-full max-w-xl bg-neutral-900 border border-neutral-800 rounded-2xl p-6 shadow-2xl space-y-5 animate-in fade-in zoom-in-95 duration-150">
-            <div className="text-center space-y-1.5 pb-2 border-b border-neutral-800">
-              <div className="inline-flex items-center justify-center w-10 h-10 rounded-xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 mb-1">
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 21h16.5M4.5 3h15M5.25 3v18m13.5-18v18M9 6.75h1.5m-1.5 3h1.5m-1.5 3h1.5m3-6H15m-1.5 3H15m-1.5 3H15M9 21v-3.375c0-.621.504-1.125 1.125-1.125h3.75c.621 0 1.125.504 1.125 1.125V21" />
-                </svg>
-              </div>
-              <h2 className="text-xl font-extrabold text-white tracking-tight">Select Gym Tenant</h2>
-              <p className="text-xs text-neutral-400 max-w-md mx-auto">
-                Your credentials unlocked access to <strong className="text-white">{pendingMemberships.length}</strong> gym locations. Choose a gym to launch:
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-neutral-900 border border-neutral-800 rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4">
+            <div className="text-center space-y-1">
+              <span className="w-10 h-10 rounded-full bg-emerald-950 border border-emerald-800 flex items-center justify-center mx-auto text-emerald-400 text-lg mb-2">
+                🏢
+              </span>
+              <h3 className="text-lg font-bold text-white">Select Gym Location</h3>
+              <p className="text-xs text-neutral-400">
+                Your credentials have authorized access to multiple gym locations. Choose which pod to manage:
               </p>
             </div>
 
-            <div className="space-y-3 max-h-80 overflow-y-auto pr-1">
+            <div className="space-y-2 max-h-64 overflow-y-auto pt-2">
               {pendingMemberships.map((m) => (
                 <button
                   key={m.gym_id}
-                  type="button"
                   onClick={() => handleSelectTenant(m)}
-                  className="w-full p-4 rounded-xl bg-neutral-950/70 hover:bg-neutral-800/80 border border-neutral-800 hover:border-emerald-500/60 text-left transition group cursor-pointer flex items-center justify-between shadow-sm"
+                  className="w-full p-3 rounded-xl bg-neutral-950 border border-neutral-800 hover:border-emerald-500/80 hover:bg-neutral-800/80 text-left transition flex items-center justify-between group cursor-pointer"
                 >
-                  <div className="space-y-1">
-                    <div className="flex items-center gap-2">
-                      <span className="font-bold text-sm text-white group-hover:text-emerald-400 transition">
-                        {m.gym_name || 'Gym Tenant'}
-                      </span>
-                      <span className="text-[10px] uppercase font-semibold px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-800">
-                        {m.role}
-                      </span>
-                    </div>
-                    <p className="text-xs text-neutral-400 font-mono">
-                      {m.gym_slug ? `${m.gym_slug}.gymos.local` : m.gym_id}
+                  <div>
+                    <h4 className="text-sm font-semibold text-white group-hover:text-emerald-400 transition">
+                      {m.gym_name || 'Gym Location'}
+                    </h4>
+                    <p className="text-xs text-neutral-500 font-mono mt-0.5">
+                      {m.gym_slug ? `${m.gym_slug}.gymos.local` : m.gym_id.slice(0, 8)}
                     </p>
                   </div>
-                  <div className="flex items-center gap-2 text-xs font-semibold text-emerald-400 group-hover:translate-x-1 transition">
-                    <span>Launch</span>
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
-                    </svg>
-                  </div>
+                  <span className="text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded bg-neutral-800 text-neutral-400 border border-neutral-700 group-hover:border-emerald-800 group-hover:text-emerald-300">
+                    {m.role}
+                  </span>
                 </button>
               ))}
-            </div>
-
-            <div className="pt-2 border-t border-neutral-800 text-center">
-              <p className="text-[11px] text-neutral-500">
-                You can switch between these gym tenants anytime using the gym selector in the top header.
-              </p>
             </div>
           </div>
         </div>

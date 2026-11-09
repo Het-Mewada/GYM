@@ -4,6 +4,8 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { fetchPlatformTenants, createTenantWithAdmin, type TenantListItem, type CreateTenantInput } from '../../lib/api';
 import { useToast } from '../../components/Toast';
+import { Navbar } from '../../components/Navbar';
+import { PhoneInput, parsePhone } from '../../components/PhoneInput';
 
 export default function PlatformTenantsPage() {
   const router = useRouter();
@@ -109,18 +111,6 @@ export default function PlatformTenantsPage() {
     }
   }, [error, toast]);
 
-  // Sign out handler
-  const handleSignOut = () => {
-    if (typeof window !== 'undefined') {
-      localStorage.removeItem('access_token');
-      localStorage.removeItem('user_name');
-      localStorage.removeItem('is_platform_admin');
-      localStorage.removeItem('gym_id');
-      localStorage.removeItem('gym_name');
-    }
-    router.replace('/');
-  };
-
   // Launch into tenant members view
   const handleLaunchTenant = (tenant: { id?: string; gymId?: string; name: string }) => {
     const targetId = tenant.id || tenant.gymId;
@@ -142,6 +132,12 @@ export default function PlatformTenantsPage() {
     }
     if (!adminFullName.trim() || !adminPhone.trim() || !adminPassword.trim()) {
       setFormError('Primary Admin Name, Mobile Phone, and Password are required.');
+      return;
+    }
+
+    const parsedAdminPhone = parsePhone(adminPhone);
+    if (!parsedAdminPhone.digits || parsedAdminPhone.digits.length !== 10) {
+      setFormError('Admin mobile phone must be exactly 10 digits.');
       return;
     }
 
@@ -216,11 +212,12 @@ export default function PlatformTenantsPage() {
   }
 
   return (
-    <div className="min-h-screen w-full bg-neutral-950 text-neutral-100 p-6 md:p-8">
-      <div className="w-full space-y-6">
+    <div className="min-h-screen w-full bg-neutral-950 text-neutral-100 flex flex-col">
+      <Navbar activePage="superadmin" />
+      <main className="w-full px-6 py-8 flex-1 space-y-6">
 
-        {/* Top Navigation & Status */}
-        <header className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-neutral-800 pb-6">
+        {/* Top Header & Status */}
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-neutral-800 pb-6">
           <div>
             <div className="flex items-center gap-2 mb-2">
               <span className="px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-950 border border-emerald-800 text-emerald-400 tracking-wider uppercase">
@@ -244,15 +241,8 @@ export default function PlatformTenantsPage() {
               </svg>
               Create New Tenant
             </button>
-
-            <button
-              onClick={handleSignOut}
-              className="px-3.5 py-2 rounded-lg bg-red-950/40 hover:bg-red-900/60 border border-red-800/80 text-xs text-red-300 font-medium transition cursor-pointer"
-            >
-              Sign Out
-            </button>
           </div>
-        </header>
+        </div>
 
         {/* Success Announcement Banner */}
         {successInfo && (
@@ -401,7 +391,7 @@ export default function PlatformTenantsPage() {
             </table>
           </div>
         </div>
-      </div>
+      </main>
 
       {/* CREATE TENANT MODAL */}
       {isModalOpen && (
@@ -559,15 +549,14 @@ export default function PlatformTenantsPage() {
 
                   <div>
                     <label className="block text-xs font-semibold text-neutral-300 mb-1">
-                      Admin Mobile Phone * (E.164)
+                      Admin Mobile Phone * <span className="text-neutral-500 font-normal">(Exact 10 digits)</span>
                     </label>
-                    <input
-                      type="tel"
-                      required
+                    <PhoneInput
+                      id="admin-phone-input"
+                      dataTestId="admin-phone-input"
                       value={adminPhone}
-                      onChange={(e) => setAdminPhone(e.target.value)}
-                      placeholder="e.g. +919876543210"
-                      className="w-full px-3 py-2 rounded-lg bg-neutral-950 border border-neutral-800 text-xs font-mono text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-emerald-500 transition"
+                      onChange={(full) => setAdminPhone(full)}
+                      required
                     />
                   </div>
                 </div>

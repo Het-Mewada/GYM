@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 import type pg from 'pg';
-import { withTenantContext, members, membershipPlans, subscriptions, paymentTransactions, eq, and, or, ilike, isNull, desc, sql } from '@gym/db';
-import { PaymentRecordSchema, RefundRecordSchema } from '@gym/shared';
+import { withTenantContext, members, membershipPlans, subscriptions, paymentTransactions, attendanceLogs, eq, and, or, ilike, isNull, desc, sql } from '@gym/db';
+import { PaymentRecordSchema, RefundRecordSchema, AttendanceCheckInSchema, AttendanceVoidSchema } from '@gym/shared';
 import { authenticateUser, createRequireTenantMembership } from '../middleware/auth.js';
 import { generateRandomToken, hashToken, hashPassword } from '../auth/crypto.js';
 
@@ -1464,7 +1464,7 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
       }
 
       // Check for PostgreSQL trigger rejection (e.g. refund exceeds original payment)
-      const rawMsg = (err as any)?.cause?.message || (err as Error)?.message || '';
+      const rawMsg = (err as { cause?: { message?: string } })?.cause?.message || (err as Error)?.message || '';
       if (rawMsg.includes('exceed') || rawMsg.includes('validate_refund_limit') || rawMsg.includes('Refund amount')) {
         return reply.status(409).send({ error: rawMsg || 'Refund amount exceeds maximum refundable limit for this payment' });
       }
@@ -1556,5 +1556,277 @@ export const gymRoutes: FastifyPluginAsync<GymRoutesOptions> = async (fastify, {
     }
 
     return reply.send(financialData);
+  });
+
+  // 22. ATTENDANCE CHECK-IN
+  fastify.post<{
+    Params: { gymId: string };
+    Body: {
+      memberId: string;
+      method?: 'staff_manual' | 'qr_kiosk';
+      wasOverride?: boolean;
+      overrideReason?: 'medical_clearance_pending' | 'payment_promised_today' | 'forgot_wallet' | 'guest_pass' | 'other_owner_approved' | null;
+      gymId?: string;
+    };
+  }>('/:gymId/attendance/check-in', { preHandler: [authenticateUser, requireTenant] }, async (req, reply) => {
+    const { gymId } = req.params;
+    const tenantContext = req.tenantContext!;
+
+    const parseResult = AttendanceCheckInSchema.safeParse(req.body);
+    if (!parseResult.success) {
+      return reply.status(400).send({
+        error: 'Validation failed',
+        issues: parseResult.error.format()
+      });
+    }
+
+    const { memberId, method, wasOverride, overrideReason } = parseResult.data;
+
+    try {
+      const result = await withTenantContext(pool, tenantContext, async (tx) => {
+        // 1. Verify member exists in this gym
+        const [member] = await tx
+          .select({ id: members.id, status: members.status })
+          .from(members)
+          .where(and(eq(members.gymId, gymId), eq(members.id, memberId), isNull(members.deletedAt)));
+
+        if (!member) {
+          throw new Error('MEMBER_NOT_FOUND');
+        }
+
+        // 2. Check for active check-in on today's date
+        const existingAttendance = await tx.execute<{ id: string }>(
+          sql`SELECT id FROM attendance_logs WHERE gym_id = ${gymId}::uuid AND member_id = ${memberId}::uuid AND attendance_date = CURRENT_DATE AND is_voided = false;`
+        );
+
+        if (existingAttendance.rows.length > 0) {
+          throw new Error('ALREADY_CHECKED_IN');
+        }
+
+        // 3. Verify active subscription covering today
+        const activeSub = await tx.execute<{ id: string }>(
+          sql`SELECT id FROM subscriptions WHERE gym_id = ${gymId}::uuid AND member_id = ${memberId}::uuid AND status = 'active' AND CURRENT_DATE >= start_date AND CURRENT_DATE <= end_date;`
+        );
+
+        if (activeSub.rows.length === 0 && !wasOverride) {
+          throw new Error('NO_ACTIVE_SUBSCRIPTION');
+        }
+
+        // 4. Record attendance
+        const [inserted] = await tx
+          .insert(attendanceLogs)
+          .values({
+            gymId,
+            memberId,
+            attendanceDate: sql`CURRENT_DATE`,
+            checkInTime: sql`CURRENT_TIMESTAMP`,
+            method: method || 'staff_manual',
+            recordedByUserId: tenantContext.userId,
+            wasOverride: wasOverride || false,
+            overrideReason: wasOverride ? overrideReason : null,
+            isVoided: false
+          })
+          .returning();
+
+        return inserted;
+      });
+
+      return reply.status(201).send({ attendance: result });
+    } catch (err: unknown) {
+      if ((err as Error).message === 'MEMBER_NOT_FOUND') {
+        return reply.status(404).send({ error: 'Member not found in this gym' });
+      }
+      if ((err as Error).message === 'ALREADY_CHECKED_IN') {
+        return reply.status(409).send({ error: 'Member has already checked in today' });
+      }
+      if ((err as Error).message === 'NO_ACTIVE_SUBSCRIPTION') {
+        return reply.status(422).send({ error: 'Member has no active subscription covering today. Override required.' });
+      }
+      const rawMsg = (err as { cause?: { message?: string } })?.cause?.message || (err as Error)?.message || '';
+      if (rawMsg.includes('uq_member_daily_attendance')) {
+        return reply.status(409).send({ error: 'Member has already checked in today' });
+      }
+      throw err;
+    }
+  });
+
+  // 23. VOID ATTENDANCE RECORD
+  fastify.post<{
+    Params: { gymId: string; attendanceId: string };
+    Body: { voidReason: string; gymId?: string };
+  }>('/:gymId/attendance/:attendanceId/void', { preHandler: [authenticateUser, requireTenant] }, async (req, reply) => {
+    const { gymId, attendanceId } = req.params;
+    const tenantContext = req.tenantContext!;
+
+    // RBAC: only owner or manager can void attendance
+    if (tenantContext.role !== 'owner' && tenantContext.role !== 'manager') {
+      return reply.status(403).send({ error: 'Forbidden: Only owners and managers can void attendance records' });
+    }
+
+    const parseResult = AttendanceVoidSchema.safeParse(req.body);
+    if (!parseResult.success) {
+      return reply.status(400).send({
+        error: 'Validation failed',
+        issues: parseResult.error.format()
+      });
+    }
+
+    const { voidReason } = parseResult.data;
+
+    try {
+      await withTenantContext(pool, tenantContext, async (tx) => {
+        await tx.execute(
+          sql`SELECT void_attendance_record(${gymId}::uuid, ${attendanceId}::uuid, ${voidReason}::text);`
+        );
+      });
+
+      return reply.send({ success: true, message: 'Attendance record voided successfully' });
+    } catch (err: unknown) {
+      const rawMsg = (err as { cause?: { message?: string } })?.cause?.message || (err as Error)?.message || '';
+      if (rawMsg.includes('not found') || rawMsg.includes('not authorized')) {
+        if (rawMsg.includes('not authorized')) {
+          return reply.status(403).send({ error: rawMsg });
+        }
+        return reply.status(404).send({ error: 'Active attendance record not found in this gym' });
+      }
+      throw err;
+    }
+  });
+
+  // 24. LIST ATTENDANCE LOGS
+  fastify.get<{
+    Params: { gymId: string };
+    Querystring: {
+      date?: string;
+      memberId?: string;
+      limit?: string;
+      offset?: string;
+    };
+  }>('/:gymId/attendance', { preHandler: [authenticateUser, requireTenant] }, async (req, reply) => {
+    const { gymId } = req.params;
+    const { date, memberId, limit = '50', offset = '0' } = req.query;
+    const parsedLimit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 100);
+    const parsedOffset = Math.max(parseInt(offset, 10) || 0, 0);
+
+    const tenantContext = req.tenantContext!;
+
+    const result = await withTenantContext(pool, tenantContext, async (tx) => {
+      const conditions = [eq(attendanceLogs.gymId, gymId)];
+      if (date) {
+        conditions.push(eq(attendanceLogs.attendanceDate, date));
+      }
+      if (memberId) {
+        conditions.push(eq(attendanceLogs.memberId, memberId));
+      }
+
+      const rows = await tx
+        .select({
+          id: attendanceLogs.id,
+          gymId: attendanceLogs.gymId,
+          memberId: attendanceLogs.memberId,
+          attendanceDate: attendanceLogs.attendanceDate,
+          checkInTime: attendanceLogs.checkInTime,
+          method: attendanceLogs.method,
+          recordedByUserId: attendanceLogs.recordedByUserId,
+          wasOverride: attendanceLogs.wasOverride,
+          overrideReason: attendanceLogs.overrideReason,
+          isVoided: attendanceLogs.isVoided,
+          voidedAt: attendanceLogs.voidedAt,
+          voidedByUserId: attendanceLogs.voidedByUserId,
+          voidReason: attendanceLogs.voidReason,
+          createdAt: attendanceLogs.createdAt,
+          memberFirstName: members.firstName,
+          memberLastName: members.lastName,
+          memberNumber: members.memberNumber,
+          memberPhone: members.phone
+        })
+        .from(attendanceLogs)
+        .leftJoin(members, and(eq(members.gymId, attendanceLogs.gymId), eq(members.id, attendanceLogs.memberId)))
+        .where(and(...conditions))
+        .orderBy(desc(attendanceLogs.checkInTime))
+        .limit(parsedLimit)
+        .offset(parsedOffset);
+
+      const [countResult] = await tx
+        .select({ count: sql<number>`count(*)::int` })
+        .from(attendanceLogs)
+        .where(and(...conditions));
+
+      return {
+        attendance: rows,
+        total: countResult?.count || 0,
+        limit: parsedLimit,
+        offset: parsedOffset
+      };
+    });
+
+    return reply.send(result);
+  });
+
+  // 25. GET MEMBER ATTENDANCE LOGS
+  fastify.get<{
+    Params: { gymId: string; memberId: string };
+    Querystring: {
+      limit?: string;
+      offset?: string;
+    };
+  }>('/:gymId/members/:memberId/attendance', { preHandler: [authenticateUser, requireTenant] }, async (req, reply) => {
+    const { gymId, memberId } = req.params;
+    const { limit = '50', offset = '0' } = req.query;
+    const parsedLimit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 100);
+    const parsedOffset = Math.max(parseInt(offset, 10) || 0, 0);
+
+    const tenantContext = req.tenantContext!;
+
+    const result = await withTenantContext(pool, tenantContext, async (tx) => {
+      const [member] = await tx
+        .select({ id: members.id, firstName: members.firstName, lastName: members.lastName, memberNumber: members.memberNumber })
+        .from(members)
+        .where(and(eq(members.gymId, gymId), eq(members.id, memberId), isNull(members.deletedAt)));
+
+      if (!member) {
+        return null;
+      }
+
+      const rows = await tx
+        .select()
+        .from(attendanceLogs)
+        .where(and(eq(attendanceLogs.gymId, gymId), eq(attendanceLogs.memberId, memberId)))
+        .orderBy(desc(attendanceLogs.checkInTime))
+        .limit(parsedLimit)
+        .offset(parsedOffset);
+
+      const [totalCount] = await tx
+        .select({ count: sql<number>`count(*)::int` })
+        .from(attendanceLogs)
+        .where(and(eq(attendanceLogs.gymId, gymId), eq(attendanceLogs.memberId, memberId), eq(attendanceLogs.isVoided, false)));
+
+      const [monthCount] = await tx
+        .select({ count: sql<number>`count(*)::int` })
+        .from(attendanceLogs)
+        .where(and(
+          eq(attendanceLogs.gymId, gymId),
+          eq(attendanceLogs.memberId, memberId),
+          eq(attendanceLogs.isVoided, false),
+          sql`DATE_TRUNC('month', attendance_date) = DATE_TRUNC('month', CURRENT_DATE)`
+        ));
+
+      return {
+        member,
+        summary: {
+          totalCheckIns: totalCount?.count || 0,
+          checkInsThisMonth: monthCount?.count || 0
+        },
+        attendance: rows,
+        limit: parsedLimit,
+        offset: parsedOffset
+      };
+    });
+
+    if (!result) {
+      return reply.status(404).send({ error: 'Member not found in this gym' });
+    }
+
+    return reply.send(result);
   });
 };

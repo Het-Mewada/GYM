@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
@@ -9,18 +9,17 @@ import {
   type UpdateMemberInput,
   type MembershipPlan,
   type SubscriptionItem,
-  type GymMembershipItem,
   fetchMembers,
   createMember,
   updateMember,
   fetchMembershipPlans,
   fetchMemberSubscriptions,
   createSubscription,
-  cancelSubscription,
-  switchGymTenant,
-  fetchPlatformTenants
+  cancelSubscription
 } from '../lib/api';
 import { useToast } from '../components/Toast';
+import { Navbar } from '../components/Navbar';
+import { PhoneInput, parsePhone } from '../components/PhoneInput';
 
 export default function MembersPage() {
   const router = useRouter();
@@ -28,25 +27,7 @@ export default function MembersPage() {
   const [isCheckingAuth, setIsCheckingAuth] = useState<boolean>(true);
   const [gymId, setGymId] = useState<string>('');
   const [gymName, setGymName] = useState<string | null>(null);
-
-  // Gym Selector & Tenant Switching State
-  const [accessibleGyms, setAccessibleGyms] = useState<Array<{
-    id: string;
-    name: string;
-    slug?: string;
-    role?: string;
-    requiresPassword?: boolean;
-  }>>([]);
-  const [isGymDropdownOpen, setIsGymDropdownOpen] = useState(false);
-  const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
-  const [targetSwitchGym, setTargetSwitchGym] = useState<{ id: string; name: string; slug?: string } | null>(null);
-  const [switchPassword, setSwitchPassword] = useState('');
-  const [switchError, setSwitchError] = useState<string | null>(null);
-  const [isSwitching, setIsSwitching] = useState(false);
-  const dropdownRef = useRef<HTMLDivElement>(null);
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
-  const [userName, setUserName] = useState<string | null>(null);
-  const [isSuperAdmin, setIsSuperAdmin] = useState<boolean>(false);
   const [members, setMembers] = useState<Member[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive'>('all');
@@ -100,17 +81,6 @@ export default function MembersPage() {
   const [customStartDate, setCustomStartDate] = useState('');
   const [discountAmount, setDiscountAmount] = useState('0');
 
-  // Close dropdown on outside click
-  useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
-        setIsGymDropdownOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
-
   // Check auth session and fetch initial members immediately on mount
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -125,69 +95,11 @@ export default function MembersPage() {
 
       const storedGymId = localStorage.getItem('gym_id');
       const storedGymName = localStorage.getItem('gym_name');
-      const storedName = localStorage.getItem('user_name');
-      const adminFlag = localStorage.getItem('is_platform_admin') === 'true';
 
       setIsAuthenticated(true);
-      setIsSuperAdmin(adminFlag);
-      if (storedName) setUserName(storedName);
       if (storedGymId) setGymId(storedGymId);
       if (storedGymName) setGymName(storedGymName);
       setIsCheckingAuth(false);
-
-      // Load accessible gyms for header dropdown selector
-      const storedMemberships = localStorage.getItem('user_memberships');
-      const allMemberships = localStorage.getItem('all_user_memberships');
-      let initialGyms: Array<{ id: string; name: string; slug?: string; role?: string; requiresPassword?: boolean }> = [];
-
-      if (allMemberships) {
-        try {
-          const parsedAll: GymMembershipItem[] = JSON.parse(allMemberships);
-          initialGyms = parsedAll.map((m) => ({
-            id: m.gym_id,
-            name: m.gym_name || 'Gym Tenant',
-            slug: m.gym_slug,
-            role: m.role,
-            requiresPassword: !m.isUnlocked
-          }));
-        } catch { /* ignore */ }
-      } else if (storedMemberships) {
-        try {
-          const parsed: GymMembershipItem[] = JSON.parse(storedMemberships);
-          initialGyms = parsed.map((m) => ({
-            id: m.gym_id,
-            name: m.gym_name || 'Gym Tenant',
-            slug: m.gym_slug,
-            role: m.role,
-            requiresPassword: false
-          }));
-        } catch { /* ignore */ }
-      }
-
-      if (initialGyms.length > 0) {
-        setAccessibleGyms(initialGyms);
-      }
-
-      // Fetch fresh list from server
-      fetchPlatformTenants(token)
-        .then((res) => {
-          if (res && Array.isArray(res.tenants)) {
-            setAccessibleGyms((prev) => {
-              const map = new Map<string, { id: string; name: string; slug?: string; role?: string; requiresPassword?: boolean }>();
-              prev.forEach((g) => map.set(g.id, g));
-              res.tenants.forEach((t) => {
-                if (!map.has(t.id)) {
-                  map.set(t.id, { id: t.id, name: t.name, slug: t.slug, role: (t as unknown as { role?: string }).role, requiresPassword: false });
-                } else {
-                  const existing = map.get(t.id)!;
-                  map.set(t.id, { ...existing, name: t.name, slug: t.slug });
-                }
-              });
-              return Array.from(map.values());
-            });
-          }
-        })
-        .catch(() => { /* fallback to local list */ });
 
       if (storedGymId) {
         setIsLoading(true);
@@ -242,7 +154,6 @@ export default function MembersPage() {
     }
     setGymId(newGymId);
     setGymName(newGymName);
-    setIsGymDropdownOpen(false);
     setIsLoading(true);
     setError(null);
     fetchMembers(newGymId)
@@ -259,45 +170,6 @@ export default function MembersPage() {
       });
   };
 
-  const handleGymSelect = (gym: { id: string; name: string; slug?: string; role?: string; requiresPassword?: boolean }) => {
-    if (gym.id === gymId) {
-      setIsGymDropdownOpen(false);
-      return;
-    }
-
-    if (gym.requiresPassword) {
-      setTargetSwitchGym(gym);
-      setSwitchPassword('');
-      setSwitchError(null);
-      setIsPasswordModalOpen(true);
-      setIsGymDropdownOpen(false);
-      return;
-    }
-
-    performSwitchGym(gym.id, gym.name);
-  };
-
-  const handleConfirmSwitchPassword = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!targetSwitchGym) return;
-    setIsSwitching(true);
-    setSwitchError(null);
-    try {
-      await switchGymTenant(targetSwitchGym.id, switchPassword);
-      setAccessibleGyms((prev) =>
-        prev.map((g) => (g.id === targetSwitchGym.id ? { ...g, requiresPassword: false } : g))
-      );
-      performSwitchGym(targetSwitchGym.id, targetSwitchGym.name);
-      setIsPasswordModalOpen(false);
-      setTargetSwitchGym(null);
-      setSwitchPassword('');
-    } catch (err: unknown) {
-      setSwitchError(err instanceof Error ? err.message : 'Incorrect password for this gym');
-    } finally {
-      setIsSwitching(false);
-    }
-  };
-
   // Handle debounced search/filter changes after initial load is done
   useEffect(() => {
     if (!isInitialLoadDone || !isAuthenticated || !gymId) return;
@@ -307,23 +179,6 @@ export default function MembersPage() {
     }, 150);
     return () => clearTimeout(timer);
   }, [isInitialLoadDone, isAuthenticated, gymId, searchQuery, statusFilter, loadMembers]);
-
-  const handleLogout = () => {
-    if (typeof window !== 'undefined') {
-      localStorage.removeItem('access_token');
-      localStorage.removeItem('user_name');
-      localStorage.removeItem('gym_id');
-      localStorage.removeItem('gym_name');
-      localStorage.removeItem('is_platform_admin');
-    }
-    setIsAuthenticated(false);
-    setIsSuperAdmin(false);
-    setUserName(null);
-    setGymId('');
-    setGymName(null);
-    setMembers([]);
-    router.replace('/');
-  };
 
   // Handle Form Submission
   const handleCreateMember = async (e: React.FormEvent) => {
@@ -337,6 +192,20 @@ export default function MembersPage() {
     if (!phone.trim()) {
       setFormError('Phone number is required');
       return;
+    }
+
+    const parsedPhone = parsePhone(phone);
+    if (!parsedPhone.digits || parsedPhone.digits.length !== 10) {
+      setFormError('Phone number must be exactly 10 digits');
+      return;
+    }
+
+    if (emergencyContactPhone.trim()) {
+      const parsedEm = parsePhone(emergencyContactPhone);
+      if (parsedEm.digits.length !== 10) {
+        setFormError('Emergency contact phone must be exactly 10 digits');
+        return;
+      }
     }
 
     // Validate duplicate phone or email in this gym
@@ -481,6 +350,20 @@ export default function MembersPage() {
     if (!editPhone.trim()) {
       setEditFormError('Phone number is required');
       return;
+    }
+
+    const parsedEditPhone = parsePhone(editPhone);
+    if (!parsedEditPhone.digits || parsedEditPhone.digits.length !== 10) {
+      setEditFormError('Phone number must be exactly 10 digits');
+      return;
+    }
+
+    if (editEmergencyContactPhone.trim()) {
+      const parsedEm = parsePhone(editEmergencyContactPhone);
+      if (parsedEm.digits.length !== 10) {
+        setEditFormError('Emergency contact phone must be exactly 10 digits');
+        return;
+      }
     }
 
     // Client-side check for duplicate phone or email in this gym (excluding current member)
@@ -723,174 +606,12 @@ export default function MembersPage() {
 
   return (
     <div className="min-h-screen bg-neutral-950 text-neutral-100 antialiased flex flex-col">
-      {/* Top Navigation */}
-      <header className="border-b border-neutral-800 bg-neutral-900/80 backdrop-blur-md sticky top-0 z-30 px-6 py-4">
-        <div className="w-full flex items-center justify-between">
-          <div className="flex items-center space-x-4">
-            <Link href="/" className="flex items-center space-x-2">
-              <span className="flex items-center justify-center w-8 h-8 rounded-lg bg-emerald-500 font-bold text-black text-sm">
-                GYM
-              </span>
-              <span className="font-extrabold text-lg tracking-tight text-white">
-                GymOS
-              </span>
-            </Link>
-            <span className="text-neutral-600">/</span>
-            {/* Gym Selector Dropdown */}
-            <div className="relative" ref={dropdownRef}>
-              <button
-                type="button"
-                onClick={() => setIsGymDropdownOpen((prev) => !prev)}
-                className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium bg-neutral-900 hover:bg-neutral-800/90 text-neutral-200 border border-neutral-700/80 hover:border-emerald-500/50 transition cursor-pointer shadow-sm group"
-                title="Switch active gym tenant"
-              >
-                <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
-                <span className="font-semibold text-emerald-400 group-hover:text-emerald-300 transition">
-                  {gymName || 'Select Gym'}
-                </span>
-                {isSuperAdmin && (
-                  <span className="text-[10px] text-neutral-400 font-normal border-l border-neutral-700 pl-1.5">
-                    Super Admin
-                  </span>
-                )}
-                <svg
-                  className={`w-3.5 h-3.5 text-neutral-400 transition-transform duration-150 ${isGymDropdownOpen ? 'rotate-180' : ''}`}
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2.5"
-                  viewBox="0 0 24 24"
-                >
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
-                </svg>
-              </button>
-
-              {/* Dropdown Menu */}
-              {isGymDropdownOpen && (
-                <div className="absolute left-0 mt-2 w-72 rounded-xl bg-neutral-900 border border-neutral-800 shadow-2xl p-2 z-50 animate-in fade-in zoom-in-95 duration-100">
-                  <div className="px-3 py-2 border-b border-neutral-800 flex items-center justify-between">
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-400">
-                      Switch Gym Tenant
-                    </span>
-                    <span className="text-[10px] text-emerald-400 font-semibold font-mono">
-                      {accessibleGyms.length} Location{accessibleGyms.length === 1 ? '' : 's'}
-                    </span>
-                  </div>
-
-                  <div className="py-1 max-h-60 overflow-y-auto space-y-1">
-                    {accessibleGyms.length === 0 ? (
-                      <div className="px-3 py-3 text-center text-xs text-neutral-500">
-                        No additional gyms found.
-                      </div>
-                    ) : (
-                      accessibleGyms.map((gym) => {
-                        const isActive = gym.id === gymId;
-                        return (
-                          <button
-                            key={gym.id}
-                            type="button"
-                            onClick={() => handleGymSelect(gym)}
-                            className={`w-full px-3 py-2 rounded-lg text-left text-xs flex items-center justify-between transition cursor-pointer ${
-                              isActive
-                                ? 'bg-emerald-950/70 text-emerald-300 font-semibold border border-emerald-800/80 shadow-sm'
-                                : 'text-neutral-300 hover:bg-neutral-800/90 hover:text-white'
-                            }`}
-                          >
-                            <div className="truncate pr-2">
-                              <div className="font-medium text-white truncate flex items-center gap-1.5">
-                                {gym.name}
-                                {isActive && (
-                                  <span className="text-[9px] px-1.5 py-0.2 rounded bg-emerald-900/80 text-emerald-300 border border-emerald-700">
-                                    Active
-                                  </span>
-                                )}
-                              </div>
-                              <div className="text-[10px] text-neutral-500 font-mono truncate">
-                                {gym.slug ? `${gym.slug}.gymos.local` : gym.id.slice(0, 8)}
-                              </div>
-                            </div>
-
-                            <div className="flex items-center gap-1.5 flex-shrink-0">
-                              {gym.role && (
-                                <span className="text-[9px] uppercase px-1.5 py-0.5 rounded bg-neutral-800 text-neutral-400 border border-neutral-700">
-                                  {gym.role}
-                                </span>
-                              )}
-                              {gym.requiresPassword && !isActive && (
-                                <span title="Distinct password required for this gym" className="text-amber-400 text-xs">
-                                  🔒
-                                </span>
-                              )}
-                            </div>
-                          </button>
-                        );
-                      })
-                    )}
-                  </div>
-
-                  {isSuperAdmin && (
-                    <div className="pt-2 mt-1 border-t border-neutral-800">
-                      <Link
-                        href="/platform/tenants"
-                        onClick={() => setIsGymDropdownOpen(false)}
-                        className="flex items-center justify-between px-3 py-2 rounded-lg text-xs text-neutral-300 hover:text-emerald-400 hover:bg-neutral-800/80 transition"
-                      >
-                        <span className="font-medium">Platform Super Admin</span>
-                        <span className="text-emerald-400 font-semibold">Manage →</span>
-                      </Link>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
-
-          <div className="flex items-center space-x-6">
-            <nav className="flex items-center space-x-4 text-sm font-medium">
-              <Link href="/" className="text-neutral-400 hover:text-white transition">
-                Overview
-              </Link>
-              <Link href="/members" className="text-emerald-400 font-semibold border-b-2 border-emerald-400 pb-1">
-                Members
-              </Link>
-              <Link href="/plans" className="text-neutral-400 hover:text-white transition">
-                Plans
-              </Link>
-              <Link href="/payments" className="text-neutral-400 hover:text-white transition">
-                Payments
-              </Link>
-              {isSuperAdmin && (
-                <Link href="/platform/tenants" className="text-neutral-400 hover:text-neutral-100 transition">
-                  Super Admin
-                </Link>
-              )}
-            </nav>
-
-            <div className="flex items-center pl-4 border-l border-neutral-800">
-              {isAuthenticated ? (
-                <div className="flex items-center space-x-3">
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-950/80 text-emerald-400 border border-emerald-800">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                    {userName || 'Staff'}
-                  </span>
-                  <button
-                    onClick={handleLogout}
-                    className="text-xs text-neutral-400 hover:text-white transition px-2.5 py-1 rounded-lg border border-neutral-800 hover:bg-neutral-800 cursor-pointer"
-                  >
-                    Sign Out
-                  </button>
-                </div>
-              ) : (
-                <Link
-                  href="/login"
-                  className="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-black text-xs font-semibold transition shadow-md shadow-emerald-950/40"
-                >
-                  Sign In
-                </Link>
-              )}
-            </div>
-          </div>
-        </div>
-      </header>
+      <Navbar
+        activePage="members"
+        currentGymId={gymId}
+        currentGymName={gymName || undefined}
+        onGymChange={performSwitchGym}
+      />
 
       {/* Main Content Area */}
       <main className="w-full px-6 py-8 flex-1 space-y-6">
@@ -1212,17 +933,14 @@ export default function MembersPage() {
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label htmlFor="phone-input" className="block text-xs font-semibold text-neutral-300 mb-1">
-                    Phone Number <span className="text-emerald-400">*</span>
+                    Phone Number <span className="text-emerald-400">*</span> <span className="text-neutral-500 font-normal">(Exact 10 digits)</span>
                   </label>
-                  <input
+                  <PhoneInput
                     id="phone-input"
-                    type="tel"
-                    data-testid="phone-input"
+                    dataTestId="phone-input"
                     required
                     value={phone}
-                    onChange={(e) => setPhone(e.target.value)}
-                    placeholder="+919876543210"
-                    className="w-full px-3 py-2 rounded-lg bg-neutral-950 border border-neutral-800 text-sm font-mono text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-emerald-500"
+                    onChange={(full) => setPhone(full)}
                   />
                 </div>
 
@@ -1294,16 +1012,13 @@ export default function MembersPage() {
 
                 <div>
                   <label htmlFor="emergency-phone-input" className="block text-xs font-semibold text-neutral-300 mb-1">
-                    Emergency Contact Phone
+                    Emergency Contact Phone <span className="text-neutral-500 font-normal">(Optional, 10 digits)</span>
                   </label>
-                  <input
+                  <PhoneInput
                     id="emergency-phone-input"
-                    type="tel"
-                    data-testid="emergency-contact-phone-input"
+                    dataTestId="emergency-contact-phone-input"
                     value={emergencyContactPhone}
-                    onChange={(e) => setEmergencyContactPhone(e.target.value)}
-                    placeholder="+91..."
-                    className="w-full px-3 py-2 rounded-lg bg-neutral-950 border border-neutral-800 text-sm font-mono text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-emerald-500"
+                    onChange={(full) => setEmergencyContactPhone(full)}
                   />
                 </div>
               </div>
@@ -1408,17 +1123,14 @@ export default function MembersPage() {
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label htmlFor="edit-phone-input" className="block text-xs font-semibold text-neutral-300 mb-1">
-                    Phone Number <span className="text-emerald-400">*</span>
+                    Phone Number <span className="text-emerald-400">*</span> <span className="text-neutral-500 font-normal">(Exact 10 digits)</span>
                   </label>
-                  <input
+                  <PhoneInput
                     id="edit-phone-input"
-                    type="tel"
-                    data-testid="edit-phone-input"
+                    dataTestId="edit-phone-input"
                     required
                     value={editPhone}
-                    onChange={(e) => setEditPhone(e.target.value)}
-                    placeholder="+919876543210"
-                    className="w-full px-3 py-2 rounded-lg bg-neutral-950 border border-neutral-800 text-sm font-mono text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-emerald-500"
+                    onChange={(full) => setEditPhone(full)}
                   />
                 </div>
 
@@ -1507,16 +1219,13 @@ export default function MembersPage() {
 
                 <div>
                   <label htmlFor="edit-emergency-phone-input" className="block text-xs font-semibold text-neutral-300 mb-1">
-                    Emergency Contact Phone
+                    Emergency Contact Phone <span className="text-neutral-500 font-normal">(Optional, 10 digits)</span>
                   </label>
-                  <input
+                  <PhoneInput
                     id="edit-emergency-phone-input"
-                    type="tel"
-                    data-testid="edit-emergency-contact-phone-input"
+                    dataTestId="edit-emergency-contact-phone-input"
                     value={editEmergencyContactPhone}
-                    onChange={(e) => setEditEmergencyContactPhone(e.target.value)}
-                    placeholder="+91..."
-                    className="w-full px-3 py-2 rounded-lg bg-neutral-950 border border-neutral-800 text-sm font-mono text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-emerald-500"
+                    onChange={(full) => setEditEmergencyContactPhone(full)}
                   />
                 </div>
               </div>
@@ -1759,85 +1468,6 @@ export default function MembersPage() {
                 </form>
               </div>
             </div>
-          </div>
-        </div>
-      )}
-      {/* UNLOCK GYM TENANT MODAL (for gyms requiring different password) */}
-      {isPasswordModalOpen && targetSwitchGym && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-sm">
-          <div className="w-full max-w-md bg-neutral-900 border border-neutral-800 rounded-2xl p-6 shadow-2xl space-y-4 animate-in fade-in zoom-in-95 duration-150">
-            <div className="flex items-center justify-between border-b border-neutral-800 pb-3">
-              <div>
-                <h3 className="text-base font-bold text-white flex items-center gap-2">
-                  <span>🔒</span> Unlock {targetSwitchGym.name}
-                </h3>
-                <p className="text-xs text-neutral-400 mt-0.5">
-                  Tenant authentication required to switch location
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setIsPasswordModalOpen(false);
-                  setTargetSwitchGym(null);
-                  setSwitchPassword('');
-                  setSwitchError(null);
-                }}
-                className="text-neutral-400 hover:text-white transition p-1 rounded-lg hover:bg-neutral-800"
-              >
-                ✕
-              </button>
-            </div>
-
-            <p className="text-xs text-neutral-300 leading-relaxed">
-              This gym tenant is configured with distinct credentials. Please enter your password for{' '}
-              <strong className="text-white">{targetSwitchGym.name}</strong> to switch:
-            </p>
-
-            {switchError && (
-              <div className="p-3 rounded-lg bg-red-950/80 border border-red-800 text-red-200 text-xs">
-                {switchError}
-              </div>
-            )}
-
-            <form onSubmit={handleConfirmSwitchPassword} className="space-y-4">
-              <div>
-                <label className="block text-xs font-semibold text-neutral-300 mb-1">
-                  Password for {targetSwitchGym.name}
-                </label>
-                <input
-                  type="password"
-                  required
-                  autoFocus
-                  value={switchPassword}
-                  onChange={(e) => setSwitchPassword(e.target.value)}
-                  placeholder="••••••••••••"
-                  className="w-full px-3 py-2 rounded-lg bg-neutral-950 border border-neutral-800 text-sm text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
-                />
-              </div>
-
-              <div className="flex justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setIsPasswordModalOpen(false);
-                    setTargetSwitchGym(null);
-                    setSwitchPassword('');
-                    setSwitchError(null);
-                  }}
-                  className="px-3.5 py-2 rounded-lg text-xs font-medium text-neutral-400 hover:text-white hover:bg-neutral-800 transition cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={isSwitching}
-                  className="px-4 py-2 rounded-lg text-xs font-semibold bg-emerald-500 hover:bg-emerald-400 text-black transition shadow-lg shadow-emerald-950/40 disabled:opacity-50 cursor-pointer"
-                >
-                  {isSwitching ? 'Verifying...' : 'Unlock & Switch'}
-                </button>
-              </div>
-            </form>
           </div>
         </div>
       )}

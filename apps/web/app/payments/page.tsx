@@ -1,8 +1,6 @@
 'use client';
 
 import React, { useState, useEffect, useCallback } from 'react';
-import Link from 'next/link';
-import { useRouter } from 'next/navigation';
 import {
   type Member,
   type PaymentItem,
@@ -11,15 +9,14 @@ import {
   recordPayment,
   refundPayment
 } from '../lib/api';
+import { Navbar } from '../components/Navbar';
+import { useToast } from '../components/Toast';
 
 export default function PaymentsPage() {
-  const router = useRouter();
+  const toast = useToast();
 
   const [gymId, setGymId] = useState<string>('');
   const [gymName, setGymName] = useState<string | null>(null);
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
-  const [userName, setUserName] = useState<string | null>(null);
-  const [isSuperAdmin, setIsSuperAdmin] = useState<boolean>(false);
 
   const [payments, setPayments] = useState<PaymentItem[]>([]);
   const [members, setMembers] = useState<Member[]>([]);
@@ -61,8 +58,8 @@ export default function PaymentsPage() {
       ]);
       setPayments(payRes.payments);
       setMembers(memRes.members);
-    } catch (err: any) {
-      setError(err.message || 'Failed to load payments ledger');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to load payments ledger');
     } finally {
       setIsLoading(false);
     }
@@ -73,13 +70,8 @@ export default function PaymentsPage() {
       const token = localStorage.getItem('access_token');
       const storedGymId = localStorage.getItem('gym_id');
       const storedGymName = localStorage.getItem('gym_name');
-      const storedName = localStorage.getItem('user_name');
-      const adminFlag = localStorage.getItem('is_platform_admin') === 'true';
 
       if (token) {
-        setIsAuthenticated(true);
-        setIsSuperAdmin(adminFlag);
-        if (storedName) setUserName(storedName);
         if (storedGymId) setGymId(storedGymId);
         if (storedGymName) setGymName(storedGymName);
 
@@ -90,7 +82,6 @@ export default function PaymentsPage() {
         }
       } else {
         // Client / preview mode
-        setIsAuthenticated(false);
         setIsLoading(false);
 
         // Load preview members if available
@@ -123,18 +114,6 @@ export default function PaymentsPage() {
       }
     }
   }, [loadData]);
-
-  const handleLogout = () => {
-    if (typeof window !== 'undefined') {
-      localStorage.removeItem('access_token');
-      localStorage.removeItem('user_name');
-      localStorage.removeItem('gym_id');
-      localStorage.removeItem('gym_name');
-      localStorage.removeItem('is_platform_admin');
-    }
-    setIsAuthenticated(false);
-    router.push('/login');
-  };
 
   const handleOpenCollectModal = () => {
     setPayMemberId(members[0]?.id || '');
@@ -178,6 +157,7 @@ export default function PaymentsPage() {
 
         setIsCollectModalOpen(false);
         setSelectedReceipt(res.payment);
+        toast.success(`Payment of ₹${payAmountInr} recorded successfully!`);
         await loadData(gymId, token);
       } else {
         // Preview mode fallback
@@ -211,8 +191,8 @@ export default function PaymentsPage() {
         setIsCollectModalOpen(false);
         setSelectedReceipt(previewPayment);
       }
-    } catch (err: any) {
-      setPaymentFormError(err.message || 'Failed to record payment');
+    } catch (err: unknown) {
+      setPaymentFormError(err instanceof Error ? err.message : 'Failed to record payment');
     } finally {
       setSubmittingPayment(false);
     }
@@ -252,6 +232,7 @@ export default function PaymentsPage() {
 
         setRefundTargetPayment(null);
         setSelectedReceipt(res.refund);
+        toast.success(`Refund of ₹${refundAmountInr} processed successfully!`);
         await loadData(gymId, token);
       } else {
         // Preview mode refund fallback
@@ -280,12 +261,19 @@ export default function PaymentsPage() {
         setRefundTargetPayment(null);
         setSelectedReceipt(previewRefund);
       }
-    } catch (err: any) {
-      setRefundFormError(err.message || 'Failed to issue refund');
+    } catch (err: unknown) {
+      setRefundFormError(err instanceof Error ? err.message : 'Failed to issue refund');
     } finally {
       setSubmittingRefund(false);
     }
   };
+
+  useEffect(() => {
+    if (error) {
+      toast.error(error);
+      setError(null);
+    }
+  }, [error, toast]);
 
   // Metrics computation
   const totalCollectedCents = payments
@@ -299,76 +287,19 @@ export default function PaymentsPage() {
   const netRevenueCents = totalCollectedCents - totalRefundedCents;
 
   return (
-    <div className="min-h-screen bg-neutral-950 text-neutral-100 font-sans selection:bg-emerald-500 selection:text-black">
-      {/* Top Header */}
-      <header className="border-b border-neutral-800 bg-neutral-900/60 backdrop-blur sticky top-0 z-40">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
-          <div className="flex items-center space-x-6">
-            <Link href="/" className="flex items-center space-x-2">
-              <span className="text-xl font-bold tracking-tight bg-gradient-to-r from-emerald-400 to-teal-500 bg-clip-text text-transparent">
-                GYM OS
-              </span>
-            </Link>
+    <div className="min-h-screen bg-neutral-950 text-neutral-100 font-sans selection:bg-emerald-500 selection:text-black flex flex-col">
+      <Navbar
+        activePage="payments"
+        currentGymId={gymId}
+        currentGymName={gymName || undefined}
+        onGymChange={(newGymId, newGymName) => {
+          setGymId(newGymId);
+          setGymName(newGymName);
+          fetchPayments(newGymId);
+        }}
+      />
 
-            {gymName && (
-              <div className="flex items-center space-x-2 text-sm text-neutral-400">
-                <span className="text-neutral-600">/</span>
-                <span className="text-xs text-neutral-300 font-medium px-2 py-1 bg-neutral-800 rounded-md border border-neutral-700">
-                  {gymName}
-                </span>
-              </div>
-            )}
-          </div>
-
-          <div className="flex items-center space-x-6">
-            <nav className="flex items-center space-x-4 text-sm font-medium">
-              <Link href="/" className="text-neutral-400 hover:text-white transition">
-                Overview
-              </Link>
-              <Link href="/members" className="text-neutral-400 hover:text-white transition">
-                Members
-              </Link>
-              <Link href="/plans" className="text-neutral-400 hover:text-white transition">
-                Plans
-              </Link>
-              <Link href="/payments" className="text-emerald-400 font-semibold border-b-2 border-emerald-400 pb-1">
-                Payments
-              </Link>
-              {isSuperAdmin && (
-                <Link href="/platform/tenants" className="text-neutral-400 hover:text-neutral-100 transition">
-                  Super Admin
-                </Link>
-              )}
-            </nav>
-
-            <div className="flex items-center pl-4 border-l border-neutral-800">
-              {isAuthenticated ? (
-                <div className="flex items-center space-x-3">
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-950/80 text-emerald-400 border border-emerald-800">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                    {userName || 'Staff'}
-                  </span>
-                  <button
-                    onClick={handleLogout}
-                    className="text-xs text-neutral-400 hover:text-white transition px-2.5 py-1 rounded-lg border border-neutral-800 hover:bg-neutral-800 cursor-pointer"
-                  >
-                    Sign Out
-                  </button>
-                </div>
-              ) : (
-                <Link
-                  href="/login"
-                  className="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-black text-xs font-semibold transition shadow-md shadow-emerald-950/40"
-                >
-                  Sign In
-                </Link>
-              )}
-            </div>
-          </div>
-        </div>
-      </header>
-
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
+      <main className="w-full px-6 py-8 flex-1 space-y-6">
         {/* Title and Actions */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div>
@@ -453,12 +384,6 @@ export default function PaymentsPage() {
         </div>
 
         {/* Ledger Table */}
-        {error && (
-          <div className="p-4 rounded-xl bg-rose-950/60 border border-rose-800 text-rose-300 text-sm">
-            {error}
-          </div>
-        )}
-
         <div className="bg-neutral-900 border border-neutral-800 rounded-2xl overflow-hidden shadow-xl shadow-black/40">
           <div className="p-4 border-b border-neutral-800 flex items-center justify-between">
             <h2 className="text-sm font-semibold text-neutral-200 uppercase tracking-wider">
@@ -633,7 +558,7 @@ export default function PaymentsPage() {
                 <select
                   data-testid="payment-method-select"
                   value={payMethod}
-                  onChange={(e: any) => setPayMethod(e.target.value)}
+                  onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setPayMethod(e.target.value as 'upi' | 'cash' | 'card_pos' | 'bank_transfer')}
                   className="w-full bg-neutral-800 border border-neutral-700 rounded-xl px-3 py-2 text-sm text-neutral-100 focus:outline-none focus:ring-1 focus:ring-emerald-500"
                 >
                   <option value="upi">UPI (GPay / PhonePe / Paytm)</option>

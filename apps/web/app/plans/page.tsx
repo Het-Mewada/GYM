@@ -1,8 +1,7 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
 import {
   type MembershipPlan,
   type CreateMembershipPlanInput,
@@ -10,16 +9,13 @@ import {
   createMembershipPlan
 } from '../lib/api';
 import { useToast } from '../components/Toast';
+import { Navbar } from '../components/Navbar';
 
 export default function PlansPage() {
-  const router = useRouter();
   const toast = useToast();
 
   const [gymId, setGymId] = useState<string>('');
   const [gymName, setGymName] = useState<string | null>(null);
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
-  const [userName, setUserName] = useState<string | null>(null);
-  const [isSuperAdmin, setIsSuperAdmin] = useState<boolean>(false);
 
   const [plans, setPlans] = useState<MembershipPlan[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
@@ -36,62 +32,44 @@ export default function PlansPage() {
   const [durationDays, setDurationDays] = useState('30');
   const [priceInr, setPriceInr] = useState('3000');
 
+  const loadPlans = useCallback((id: string, token?: string) => {
+    setIsLoading(true);
+    fetchMembershipPlans(id, undefined, token)
+      .then((res) => {
+        if (res && Array.isArray(res.plans)) {
+          setPlans(res.plans);
+        }
+      })
+      .catch((err: unknown) => {
+        setError(err instanceof Error ? err.message : 'Failed to fetch membership plans');
+      })
+      .finally(() => {
+        setIsLoading(false);
+      });
+  }, []);
+
   // Check auth session on mount
   useEffect(() => {
     if (typeof window !== 'undefined') {
       const token = localStorage.getItem('access_token');
       if (!token) {
-        setIsAuthenticated(false);
         setIsLoading(false);
         return;
       }
 
       const storedGymId = localStorage.getItem('gym_id');
       const storedGymName = localStorage.getItem('gym_name');
-      const storedName = localStorage.getItem('user_name');
-      const adminFlag = localStorage.getItem('is_platform_admin') === 'true';
 
-      setIsAuthenticated(true);
-      setIsSuperAdmin(adminFlag);
-      if (storedName) setUserName(storedName);
       if (storedGymId) setGymId(storedGymId);
       if (storedGymName) setGymName(storedGymName);
 
       if (storedGymId) {
-        setIsLoading(true);
-        fetchMembershipPlans(storedGymId, undefined, token)
-          .then((res) => {
-            if (res && Array.isArray(res.plans)) {
-              setPlans(res.plans);
-            }
-          })
-          .catch((err: unknown) => {
-            setError(err instanceof Error ? err.message : 'Failed to fetch membership plans');
-          })
-          .finally(() => {
-            setIsLoading(false);
-          });
+        loadPlans(storedGymId, token);
       } else {
         setIsLoading(false);
       }
     }
-  }, []);
-
-
-
-  const handleLogout = () => {
-    if (typeof window !== 'undefined') {
-      localStorage.removeItem('access_token');
-      localStorage.removeItem('user_name');
-      localStorage.removeItem('gym_id');
-      localStorage.removeItem('gym_name');
-      localStorage.removeItem('is_platform_admin');
-    }
-    setIsAuthenticated(false);
-    setUserName(null);
-    setGymId('');
-    router.replace('/');
-  };
+  }, [loadPlans]);
 
   const handleCreatePlan = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -170,75 +148,19 @@ export default function PlansPage() {
 
   return (
     <div className="min-h-screen bg-neutral-950 text-neutral-100 antialiased flex flex-col">
-      {/* Top Navigation */}
-      <header className="border-b border-neutral-800 bg-neutral-900/80 backdrop-blur-md sticky top-0 z-30 px-6 py-4">
-        <div className="max-w-7xl mx-auto flex items-center justify-between">
-          <div className="flex items-center space-x-4">
-            <Link href="/" className="flex items-center space-x-2">
-              <span className="flex items-center justify-center w-8 h-8 rounded-lg bg-emerald-500 font-bold text-black text-sm">
-                GYM
-              </span>
-              <span className="font-extrabold text-lg tracking-tight text-white">
-                GymOS
-              </span>
-            </Link>
-            <span className="text-neutral-600">/</span>
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-neutral-800 text-neutral-300 border border-neutral-700">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-              {gymName ? gymName : isAuthenticated ? 'Active Gym Pod' : 'Preview Mode'}
-            </span>
-          </div>
-
-          <div className="flex items-center space-x-6">
-            <nav className="hidden md:flex items-center space-x-4 text-sm font-medium">
-              <Link href="/" className="text-neutral-400 hover:text-white transition">
-                Overview
-              </Link>
-              <Link href="/members" className="text-neutral-400 hover:text-white transition">
-                Members
-              </Link>
-              <Link href="/plans" className="text-emerald-400 font-semibold border-b-2 border-emerald-400 pb-1">
-                Plans
-              </Link>
-              <Link href="/payments" className="text-neutral-400 hover:text-white transition">
-                Payments
-              </Link>
-              {isSuperAdmin && (
-                <Link href="/platform/tenants" className="text-neutral-400 hover:text-neutral-100 transition">
-                  Super Admin
-                </Link>
-              )}
-            </nav>
-
-            <div className="flex items-center pl-4 border-l border-neutral-800">
-              {isAuthenticated ? (
-                <div className="flex items-center space-x-3">
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-950/80 text-emerald-400 border border-emerald-800">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                    {userName || 'Staff'}
-                  </span>
-                  <button
-                    onClick={handleLogout}
-                    className="text-xs text-neutral-400 hover:text-white transition px-2.5 py-1 rounded-lg border border-neutral-800 hover:bg-neutral-800 cursor-pointer"
-                  >
-                    Sign Out
-                  </button>
-                </div>
-              ) : (
-                <Link
-                  href="/login"
-                  className="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-black text-xs font-semibold transition shadow-md shadow-emerald-950/40"
-                >
-                  Sign In
-                </Link>
-              )}
-            </div>
-          </div>
-        </div>
-      </header>
+      <Navbar
+        activePage="plans"
+        currentGymId={gymId}
+        currentGymName={gymName || undefined}
+        onGymChange={(newGymId, newGymName) => {
+          setGymId(newGymId);
+          setGymName(newGymName);
+          loadPlans(newGymId);
+        }}
+      />
 
       {/* Main Content Area */}
-      <main className="max-w-7xl mx-auto px-6 py-8 flex-1 w-full space-y-6">
+      <main className="w-full px-6 py-8 flex-1 space-y-6">
         {/* Header Title & Actions */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
