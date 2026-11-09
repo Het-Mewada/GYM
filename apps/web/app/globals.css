@@ -5,6 +5,55 @@
   --foreground: #ededed;
 }
 
+/* ==========================================================================
+   Global Scrollbar Invisibility (Full scrolling preserved across all devices)
+   ========================================================================== */
+
+/* 1. Firefox standards */
+html,
+body,
+*,
+*::before,
+*::after {
+  scrollbar-width: none !important;
+}
+
+/* 2. IE 10+ and Edge Legacy */
+html,
+body,
+*,
+*::before,
+*::after {
+  -ms-overflow-style: none !important;
+}
+
+/* 3. WebKit / Blink (Chrome, Safari, Edge, Opera, iOS Safari, Android Chrome) */
+::-webkit-scrollbar,
+*::-webkit-scrollbar {
+  display: none !important;
+  width: 0px !important;
+  height: 0px !important;
+  background: transparent !important;
+}
+
+::-webkit-scrollbar-thumb,
+*::-webkit-scrollbar-thumb {
+  display: none !important;
+  background: transparent !important;
+}
+
+::-webkit-scrollbar-track,
+*::-webkit-scrollbar-track {
+  display: none !important;
+  background: transparent !important;
+}
+
+::-webkit-scrollbar-corner,
+*::-webkit-scrollbar-corner {
+  display: none !important;
+  background: transparent !important;
+}
+
 body {
   background: var(--background);
   color: var(--foreground);
